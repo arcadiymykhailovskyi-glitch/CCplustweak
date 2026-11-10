@@ -13,25 +13,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos and Toolchain
+      - name: Setup Theos and Official Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg fakeroot git
+          sudo apt-get install -y dpkg fakeroot git curl zstd
 
-          # Удаляем всё старое, если осталось
-          rm -rf $GITHUB_WORKSPACE/theos
-
-          # Клонируем Theos
+          # 1. Клонируем Theos
           git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
-
-          # Клонируем SDK
+          
+          # 2. Клонируем SDK
           rm -rf $GITHUB_WORKSPACE/theos/sdks
           git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
 
-          # Клонируем официальный линукс-тулчейн напрямую через git (без архивов и curl)
-          mkdir -p $GITHUB_WORKSPACE/theos/toolchain/linux
-          git clone --depth=1 https://github.com/theos/toolchain-linux.git $GITHUB_WORKSPACE/theos/toolchain/linux || \
-          git clone --depth=1 https://github.com/theos/toolchain.git $GITHUB_WORKSPACE/theos/toolchain/linux
+          # 3. Запускаем встроенный скрипт Theos для установки правильного Linux-тулчейна
+          export THEOS=$GITHUB_WORKSPACE/theos
+          bash $THEOS/bin/lib/install-theos-toolchain.sh || bash $THEOS/bin/install-theos.sh
 
       - name: Build Tweak for Dopamine (Rootless)
         run: |
@@ -45,3 +41,4 @@ jobs:
         with:
           name: CCPlus-deb
           path: packages/*.deb
+          
