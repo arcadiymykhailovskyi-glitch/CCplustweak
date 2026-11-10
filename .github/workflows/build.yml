@@ -13,18 +13,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos, SDK & Toolchain
-        run: |
-          git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
-          rm -rf $GITHUB_WORKSPACE/theos/sdks
-          git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
-          # Клонируем тулчейн компиляторов прямо в папку toolchain для linux
-          git clone https://github.com/theos/toolchain:linux $GITHUB_WORKSPACE/theos/toolchain/linux || true
+      - name: Setup Theos
+        uses: theos/actions/setup-theos@master
 
       - name: Build Tweak for Dopamine (Rootless)
         run: |
-          export THEOS=$GITHUB_WORKSPACE/theos
-          export PATH="$THEOS/bin:$PATH"
           make clean
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
