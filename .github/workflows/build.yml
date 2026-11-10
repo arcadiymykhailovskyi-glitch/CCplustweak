@@ -1,16 +1,47 @@
+name: Build Rootless Deb
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Setup Theos and Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg fakeroot zstd git curl
+          sudo apt-get install -y dpkg fakeroot git
+
+          # Удаляем всё старое, если осталось
+          rm -rf $GITHUB_WORKSPACE/theos
 
           # Клонируем Theos
           git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
-          
-          # Качаем и ставим SDK
+
+          # Клонируем SDK
           rm -rf $GITHUB_WORKSPACE/theos/sdks
           git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
 
-          # Правильный способ клонирования тулчейна для Linux через submodules или git clone в нужную папку
+          # Клонируем официальный линукс-тулчейн напрямую через git (без архивов и curl)
           mkdir -p $GITHUB_WORKSPACE/theos/toolchain/linux
-          git clone https://github.com/theos/toolchain.git --branch linux --single-branch $GITHUB_WORKSPACE/theos/toolchain/linux || \
-          git clone https://github.com/theos/toolchain.git $GITHUB_WORKSPACE/theos/toolchain/linux
+          git clone --depth=1 https://github.com/theos/toolchain-linux.git $GITHUB_WORKSPACE/theos/toolchain/linux || \
+          git clone --depth=1 https://github.com/theos/toolchain.git $GITHUB_WORKSPACE/theos/toolchain/linux
+
+      - name: Build Tweak for Dopamine (Rootless)
+        run: |
+          export THEOS=$GITHUB_WORKSPACE/theos
+          export PATH="$THEOS/bin:$PATH"
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload DEB Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCPlus-deb
+          path: packages/*.deb
