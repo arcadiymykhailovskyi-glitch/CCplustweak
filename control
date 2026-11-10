@@ -1,0 +1,9 @@
+Package: com.yourname.ccplus
+Name: CCPlus
+Version: 0.0.1
+Architecture: iphoneos-arm
+Description: iOS 18-style Control Center editor (plus and minus buttons)
+Maintainer: yourname
+Author: yourname
+Section: Tweaks
+Depends: mobilesubstrate
