@@ -16,6 +16,7 @@ jobs:
       - name: Setup Theos and SDK
         run: |
           git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
+          rm -rf $GITHUB_WORKSPACE/theos/sdks
           git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
 
       - name: Build Tweak for Dopamine (Rootless)
