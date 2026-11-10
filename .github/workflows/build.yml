@@ -1,0 +1,30 @@
+name: Build Rootless Deb
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: howett/actions-setup-theos@v1
+
+      - name: Build Tweak for Dopamine (Rootless)
+        run: |
+          export THEOS=/github/home/theos
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload DEB Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCPlus-deb
+          path: packages/*.deb
+          
