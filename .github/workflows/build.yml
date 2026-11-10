@@ -13,23 +13,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies & Theos
+      - name: Setup Theos and Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld llvm make dpkg fakeroot git zstd
+          sudo apt-get install -y dpkg fakeroot zstd curl git
 
           # Клонируем Theos
           git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
-          
-          # Клонируем SDK
+
+          # Качаем и ставим SDK
           rm -rf $GITHUB_WORKSPACE/theos/sdks
           git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
 
-          # Создаем структуру папок тулчейна и линкуем системный clang, чтобы Theos его увидел
-          mkdir -p $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin
-          ln -s /usr/bin/clang $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin/clang
-          ln -s /usr/bin/clang++ $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin/clang++
-          ln -s /usr/bin/lld $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin/ld
+          # Скачиваем официальный Linux-тулчейн Theos (компилятор clang под arm64)
+          mkdir -p $GITHUB_WORKSPACE/theos/toolchain/linux
+          curl -L -o /tmp/linux.tar.zst https://github.com/theos/toolchain/releases/download/v0.1-RC1/linux.tar.zst
+          tar --zstd -xf /tmp/linux.tar.zst -C $GITHUB_WORKSPACE/theos/toolchain/linux
 
       - name: Build Tweak for Dopamine (Rootless)
         run: |
