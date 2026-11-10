@@ -25,6 +25,12 @@ jobs:
           rm -rf $GITHUB_WORKSPACE/theos/sdks
           git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
 
+          # Создаем структуру папок тулчейна и линкуем системный clang, чтобы Theos его увидел
+          mkdir -p $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin
+          ln -s /usr/bin/clang $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin/clang
+          ln -s /usr/bin/clang++ $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin/clang++
+          ln -s /usr/bin/lld $GITHUB_WORKSPACE/theos/toolchain/linux/iphone/bin/ld
+
       - name: Build Tweak for Dopamine (Rootless)
         run: |
           export THEOS=$GITHUB_WORKSPACE/theos
@@ -37,4 +43,3 @@ jobs:
         with:
           name: CCPlus-deb
           path: packages/*.deb
-          
