@@ -13,22 +13,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Theos and Toolchain
+      - name: Install Dependencies & Clone Theos
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg fakeroot curl git make zstd
+          sudo apt-get install -y dpkg fakeroot git curl zstd make
 
-          # Официальный установщик Theos (скачает сам Theos, тулчейн и базовый SDK в ~/theos)
-          export THEOS=~/theos
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" || true
+          # Удаляем старый мусор, если остался
+          rm -rf $GITHUB_WORKSPACE/theos
 
-          # Докачиваем полный набор актуальных SDK для гарантии
-          rm -rf ~/theos/sdks
-          git clone https://github.com/theos/sdks.git ~/theos/sdks
+          # Клонируем официальный Theos со всеми сабмодулями прямо в рабочую папку проекта
+          git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
+
+          # Клонируем актуальные SDK
+          rm -rf $GITHUB_WORKSPACE/theos/sdks
+          git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
 
       - name: Build Tweak for Dopamine (Rootless)
         run: |
-          export THEOS=~/theos
+          export THEOS=$GITHUB_WORKSPACE/theos
           export PATH="$THEOS/bin:$PATH"
           make clean
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
