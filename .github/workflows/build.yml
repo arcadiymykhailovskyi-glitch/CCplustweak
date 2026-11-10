@@ -13,11 +13,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos and SDK
+      - name: Setup Theos, SDK & Toolchain
         run: |
           git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
           rm -rf $GITHUB_WORKSPACE/theos/sdks
           git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
+          # Установка линуксового тулчейна (компиляторов clang/ld) для Theos
+          bash $GITHUB_WORKSPACE/theos/bin/lib/install-theos-toolchain.sh
 
       - name: Build Tweak for Dopamine (Rootless)
         run: |
