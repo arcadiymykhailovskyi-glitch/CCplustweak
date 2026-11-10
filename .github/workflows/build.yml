@@ -18,8 +18,8 @@ jobs:
           git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
           rm -rf $GITHUB_WORKSPACE/theos/sdks
           git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
-          # Установка линуксового тулчейна (компиляторов clang/ld) для Theos
-          bash $GITHUB_WORKSPACE/theos/bin/lib/install-theos-toolchain.sh
+          # Клонируем тулчейн компиляторов прямо в папку toolchain для linux
+          git clone https://github.com/theos/toolchain:linux $GITHUB_WORKSPACE/theos/toolchain/linux || true
 
       - name: Build Tweak for Dopamine (Rootless)
         run: |
