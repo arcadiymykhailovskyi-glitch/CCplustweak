@@ -13,11 +13,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos
-        uses: theos/actions/setup-theos@master
+      - name: Manual Setup Theos, SDK and Toolchain
+        run: |
+          # 1. Качаем Theos
+          git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
+          
+          # 2. Качаем SDK
+          rm -rf $GITHUB_WORKSPACE/theos/sdks
+          git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
+
+          # 3. Качаем и ставим готовый линуксовый тулчейн (clang) в ту самую папку, которую ждет theos
+          mkdir -p $GITHUB_WORKSPACE/theos/toolchain/linux
+          curl -L -o /tmp/toolchain.tar.zst https://github.com/theos/toolchain/releases/download/v0.1-RC1/linux.tar.zst || curl -L -o /tmp/toolchain.tar.zst https://github.com/theos/toolchain/releases/latest/download/linux.tar.zst
+          tar -xf /tmp/toolchain.tar.zst -C $GITHUB_WORKSPACE/theos/toolchain/linux
 
       - name: Build Tweak for Dopamine (Rootless)
         run: |
+          export THEOS=$GITHUB_WORKSPACE/theos
+          export PATH="$THEOS/bin:$PATH"
           make clean
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
