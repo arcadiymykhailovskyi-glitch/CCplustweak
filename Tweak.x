@@ -274,24 +274,18 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 %new
 - (void)cx_removeTapped {
     tMinus++;
+    id keepAlive = self;   // модуль может исчезнуть прямо во время вызова: держим себя до конца метода
     NSString *ident = [self moduleIdentifier];
-    NSArray *cur = CXReadModuleIDs();
-    if (!ident || !cur) { CXDebugLog(@"−: нет ident или конфига"); return; }
+    if (!ident) { CXDebugLog(@"−: нет идентификатора"); return; }
 
-    NSString *match = CXMatchModuleID(ident, cur);
-    if (!match) {
-        CXDebugLog([NSString stringWithFormat:@"−: «%@» не найден в конфиге", ident]);
-        return;   // не гасим модуль, если реально ничего не удалили
-    }
-    NSMutableArray *ids = [cur mutableCopy];
-    [ids removeObject:match];
-    if (!CXWriteModuleIDs(ids)) { CXDebugLog(@"−: запись не удалась"); return; }
+    BOOL ok = NO;
+    NSString *res = CXRemoveModule(ident, &ok);
+    CXDebugLog(res);
+    if (!ok) return;
 
-    CXDebugLog([NSString stringWithFormat:@"−: %@  было %lu → стало %lu",
-                CXShortID(match), (unsigned long)cur.count, (unsigned long)CXReadModuleIDs().count]);
-    // Респринга нет: модуль гаснет, изменения применятся по «Применить»
-    CXMarkRemoved(ident);
-    [self cx_updateBadge];
+    CXMarkRemoved(ident);   // если живое удаление не сработало, модуль просто погаснет до «Применить»
+    if (self.isViewLoaded) [self cx_updateBadge];
+    (void)keepAlive;
 }
 
 %end

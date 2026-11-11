@@ -6,6 +6,152 @@
 static NSString *const kConfigPath = @"/var/mobile/Library/ControlCenter/ModuleConfiguration.plist";
 static NSString *const kIDsKey = @"module-identifiers";
 
+// ---------- Рантайм-хелперы (приватные классы без заголовков) ----------
+
+static id CXCallGetter(id target, SEL sel) {
+    return ((id (*)(id, SEL))objc_msgSend)(target, sel);
+}
+
+static id CXIvarOfClass(id owner, NSString *clsName) {
+    if (!owner) return nil;
+    unsigned n = 0;
+    Ivar *iv = class_copyIvarList(object_getClass(owner), &n);
+    id found = nil;
+    for (unsigned i = 0; i < n && !found; i++) {
+        const char *t = ivar_getTypeEncoding(iv[i]);
+        if (t && strstr(t, clsName.UTF8String)) found = object_getIvar(owner, iv[i]);
+    }
+    free(iv);
+    return found;
+}
+
+static NSArray *CXArrayFrom(id r) {
+    if ([r isKindOfClass:NSArray.class]) return r;
+    if ([r isKindOfClass:NSSet.class]) return [(NSSet *)r allObjects];
+    return @[];
+}
+
+static id CXNewProvider(void) {
+    Class c = NSClassFromString(@"CCSModuleSettingsProvider");
+    return c ? [[c alloc] init] : nil;
+}
+
+static NSArray *CXProvList(id prov, NSString *selName) {
+    SEL s = NSSelectorFromString(selName);
+    if (!prov || ![prov respondsToSelector:s]) return @[];
+    @try { return CXArrayFrom(CXCallGetter(prov, s)); } @catch (NSException *e) { return @[]; }
+}
+
+static void CXProvSet(id prov, NSString *selName, NSArray *arr) {
+    SEL s = NSSelectorFromString(selName);
+    if (!prov || ![prov respondsToSelector:s]) return;
+    @try { ((void (*)(id, SEL, id))objc_msgSend)(prov, s, arr); } @catch (NSException *e) {}
+}
+
+static id CXManager(void) {
+    Class c = NSClassFromString(@"CCUIModuleInstanceManager");
+    SEL s = NSSelectorFromString(@"sharedInstance");
+    if (c && [c respondsToSelector:s]) return CXCallGetter(c, s);
+    return nil;
+}
+
+static NSSet *CXLiveSet(id im) {
+    SEL s = NSSelectorFromString(@"enabledModuleIdentifiers");
+    if (!im || ![im respondsToSelector:s]) return nil;
+    id r = CXCallGetter(im, s);
+    if ([r isKindOfClass:NSSet.class]) return r;
+    if ([r isKindOfClass:NSArray.class]) return [NSSet setWithArray:r];
+    return nil;
+}
+
+static void CXSetLive(id im, NSSet *set) {
+    SEL s = NSSelectorFromString(@"setEnabledModuleIdentifiers:");
+    if (!im || ![im respondsToSelector:s]) return;
+    @try { ((void (*)(id, SEL, id))objc_msgSend)(im, s, set); } @catch (NSException *e) {}
+}
+
+NSSet<NSString *> *CXCurrentEnabledIDs(void) {
+    id prov = CXNewProvider();
+    NSMutableSet *all = [NSMutableSet new];
+    NSSet *live = CXLiveSet(CXManager());
+    if (live) [all unionSet:live];
+    [all addObjectsFromArray:CXProvList(prov, @"orderedUserEnabledModuleIdentifiers")];
+    [all addObjectsFromArray:CXProvList(prov, @"orderedUserEnabledFixedModuleIdentifiers")];
+    [all addObjectsFromArray:CXProvList(prov, @"orderedFixedModuleIdentifiers")];
+    return all;
+}
+
+NSString *CXRemoveModule(NSString *ident, BOOL *ok) {
+    if (ok) *ok = NO;
+    id prov = CXNewProvider();
+    NSArray *fx = CXProvList(prov, @"orderedFixedModuleIdentifiers");
+    NSArray *ue = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
+    NSArray *uf = CXProvList(prov, @"orderedUserEnabledFixedModuleIdentifiers");
+    NSMutableString *log = [NSMutableString stringWithFormat:@"−%@: ", CXShortID(ident)];
+
+    if ([fx containsObject:ident] && ![uf containsObject:ident]) {
+        [log appendString:@"фиксированный модуль, убрать нельзя"];
+        return log;
+    }
+
+    if ([ue containsObject:ident]) {
+        NSMutableArray *n = [ue mutableCopy];
+        [n removeObject:ident];
+        CXProvSet(prov, @"setAndSaveOrderedUserEnabledModuleIdentifiers:", n);
+        [log appendFormat:@"сохранено(%lu→%lu) ", (unsigned long)ue.count, (unsigned long)n.count];
+    } else if ([uf containsObject:ident]) {
+        NSMutableArray *n = [uf mutableCopy];
+        [n removeObject:ident];
+        CXProvSet(prov, @"setAndSaveOrderedUserEnabledFixedModuleIdentifiers:", n);
+        [log appendString:@"сохранено(fixed) "];
+    } else {
+        [log appendString:@"нет в списках настроек "];
+    }
+
+    id im = CXManager();
+    NSSet *live = CXLiveSet(im);
+    if (live && [live containsObject:ident]) {
+        NSMutableSet *n = [live mutableCopy];
+        [n removeObject:ident];
+        CXSetLive(im, n);
+        NSSet *after = CXLiveSet(im);
+        [log appendFormat:@"live %lu→%lu", (unsigned long)live.count, (unsigned long)after.count];
+    } else {
+        [log appendString:@"live: не найден"];
+    }
+    if (ok) *ok = YES;
+    return log;
+}
+
+NSString *CXAddModule(NSString *ident) {
+    id prov = CXNewProvider();
+    NSArray *fx = CXProvList(prov, @"orderedFixedModuleIdentifiers");
+    NSArray *ue = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
+    NSMutableString *log = [NSMutableString stringWithFormat:@"+%@: ", CXShortID(ident)];
+
+    if (![ue containsObject:ident] && ![fx containsObject:ident]) {
+        NSMutableArray *n = [ue mutableCopy];
+        [n addObject:ident];
+        CXProvSet(prov, @"setAndSaveOrderedUserEnabledModuleIdentifiers:", n);
+        [log appendFormat:@"сохранено(%lu→%lu) ", (unsigned long)ue.count, (unsigned long)n.count];
+    } else {
+        [log appendString:@"уже в настройках "];
+    }
+
+    id im = CXManager();
+    NSSet *live = CXLiveSet(im);
+    if (live && ![live containsObject:ident]) {
+        NSMutableSet *n = [live mutableCopy];
+        [n addObject:ident];
+        CXSetLive(im, n);
+        NSSet *after = CXLiveSet(im);
+        [log appendFormat:@"live %lu→%lu", (unsigned long)live.count, (unsigned long)after.count];
+    } else {
+        [log appendString:live ? @"live: уже включён" : @"live: нет менеджера"];
+    }
+    return log;
+}
+
 NSArray<NSString *> *CXReadModuleIDs(void) {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kConfigPath];
     NSArray *ids = d[kIDsKey];
@@ -79,6 +225,24 @@ NSArray<NSDictionary *> *CXAvailableModules(void) {
                              @"category": CXCategoryFor(key), @"icon": CXIconFor(key) };
         }
     }
+    // Идентификаторы, которые Control Center реально может загрузить (из репозитория модулей)
+    id repo = CXIvarOfClass(CXManager(), @"CCSModuleRepository");
+    SEL loadSel = NSSelectorFromString(@"loadableModuleIdentifiers");
+    if (repo && [repo respondsToSelector:loadSel]) {
+        @try {
+            for (id ident in CXArrayFrom(CXCallGetter(repo, loadSel))) {
+                if (![ident isKindOfClass:NSString.class] || seen[ident]) continue;
+                NSString *key = [(NSString *)ident lowercaseString];
+                seen[ident] = @{ @"id": ident, @"name": CXShortID(ident),
+                                 @"category": CXCategoryFor(key), @"icon": CXIconFor(key) };
+            }
+        } @catch (NSException *e) {}
+    }
+    // Нельзя добавлять фиксированные модули (Connectivity и т.п.)
+    NSArray *fixed = CXProvList(CXNewProvider(), @"orderedFixedModuleIdentifiers");
+    NSArray *userFixed = CXProvList(CXNewProvider(), @"orderedUserEnabledFixedModuleIdentifiers");
+    for (NSString *f in fixed) if (![userFixed containsObject:f]) [seen removeObjectForKey:f];
+
     NSSortDescriptor *sd = [NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
                                                          selector:@selector(localizedCaseInsensitiveCompare:)];
     return [seen.allValues sortedArrayUsingDescriptors:@[sd]];
@@ -137,15 +301,16 @@ NSString *CXShortID(NSString *ident) {
 }
 
 NSString *CXConfigSummary(void) {
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kConfigPath];
-    if (!d) return @"cfg: файл НЕ читается";
-    NSArray *ids = d[kIDsKey];
-    if (![ids isKindOfClass:NSArray.class]) {
-        return [NSString stringWithFormat:@"cfg: нет module-identifiers; ключи: %@", [d.allKeys componentsJoinedByString:@","]];
-    }
-    NSMutableArray *short_ = [NSMutableArray new];
-    for (NSString *i in ids) [short_ addObject:CXShortID(i)];
-    return [NSString stringWithFormat:@"cfg ids(%lu): %@", (unsigned long)ids.count, [short_ componentsJoinedByString:@","]];
+    id prov = CXNewProvider();
+    NSArray *fx = CXProvList(prov, @"orderedFixedModuleIdentifiers");
+    NSArray *ue = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
+    NSArray *uf = CXProvList(prov, @"orderedUserEnabledFixedModuleIdentifiers");
+    NSSet *live = CXLiveSet(CXManager());
+    NSMutableArray *names = [NSMutableArray new];
+    for (NSString *i in ue) [names addObject:CXShortID(i)];
+    return [NSString stringWithFormat:@"live=%lu  fixed=%lu  ue-fixed=%lu\nue(%lu): %@",
+            (unsigned long)live.count, (unsigned long)fx.count, (unsigned long)uf.count,
+            (unsigned long)ue.count, [names componentsJoinedByString:@","]];
 }
 
 NSString *CXMatchModuleID(NSString *ident, NSArray<NSString *> *ids) {
@@ -158,10 +323,6 @@ NSString *CXMatchModuleID(NSString *ident, NSArray<NSString *> *ids) {
 
 // ---------- Отчёт для отладки ----------
 
-static id CXCallGetter(id target, SEL sel) {
-    return ((id (*)(id, SEL))objc_msgSend)(target, sel);
-}
-
 static NSString *CXTrim(id obj, NSUInteger max) {
     NSString *s = obj ? [obj description] : @"(nil)";
     s = [[s componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
@@ -171,6 +332,7 @@ static NSString *CXTrim(id obj, NSUInteger max) {
 
 static BOOL CXLooksSafeGetter(NSString *name) {
     if ([name containsString:@":"]) return NO;
+    if ([name isEqualToString:@"loadableModuleIdentifiers"]) return YES;
     NSArray *deny = @[@"set", @"save", @"load", @"reset", @"remove", @"add", @"update", @"write",
                       @"delete", @"register", @"start", @"stop", @"init", @"new", @"copy", @"dealloc",
                       @"_set", @"_save", @"_load", @"_reset", @"_remove", @"_add", @"_update", @"_write",
@@ -183,19 +345,6 @@ static BOOL CXLooksSafeGetter(NSString *name) {
         if ([l containsString:k]) return YES;
     }
     return NO;
-}
-
-static id CXIvarOfClass(id owner, NSString *clsName) {
-    if (!owner) return nil;
-    unsigned n = 0;
-    Ivar *iv = class_copyIvarList(object_getClass(owner), &n);
-    id found = nil;
-    for (unsigned i = 0; i < n && !found; i++) {
-        const char *t = ivar_getTypeEncoding(iv[i]);
-        if (t && strstr(t, clsName.UTF8String)) found = object_getIvar(owner, iv[i]);
-    }
-    free(iv);
-    return found;
 }
 
 static void CXProbeObject(id inst, Class c, NSMutableString *out) {
@@ -216,7 +365,7 @@ static void CXProbeObject(id inst, Class c, NSMutableString *out) {
             free(rt);
             if (isObj && [inst respondsToSelector:s]) {
                 @try {
-                    [out appendFormat:@"%@ = %@\n", name, CXTrim(CXCallGetter(inst, s), 350)];
+                    [out appendFormat:@"%@ = %@\n", name, CXTrim(CXCallGetter(inst, s), 1200)];
                 } @catch (NSException *e) {
                     [out appendFormat:@"%@ = <exception>\n", name];
                 }
@@ -250,7 +399,8 @@ NSString *CXBuildReport(NSArray<NSString *> *shownIDs) {
     if (repo) CXProbeObject(repo, NSClassFromString(@"CCSModuleRepository"), r);
     else [r appendString:@"\nCCSModuleRepository: не найден в ivar\n"];
     Class provC = NSClassFromString(@"CCSModuleSettingsProvider");
+    if (!prov) prov = CXNewProvider();
     if (prov) CXProbeObject(prov, provC, r);
-    else if (provC) { [r appendString:@"\nSettingsProvider: экземпляр не найден, только методы\n"]; CXProbeObject(nil, provC, r); }
+    else [r appendString:@"\nCCSModuleSettingsProvider: не создан\n"];
     return r;
 }

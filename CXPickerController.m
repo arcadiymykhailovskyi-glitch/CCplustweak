@@ -18,7 +18,7 @@
     self.view.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1.0];
 
     self.all = CXAvailableModules();
-    self.current = [NSSet setWithArray:(CXReadModuleIDs() ?: @[])];
+    self.current = CXCurrentEnabledIDs();
 
     self.search = [UISearchBar new];
     self.search.placeholder = @"Поиск элементов";
@@ -124,13 +124,8 @@
     NSDictionary *m = [self moduleAt:ip];
     if ([self.current containsObject:m[@"id"]]) return; // уже добавлен
 
-    NSArray *before = CXReadModuleIDs();
-    NSMutableArray *ids = [before mutableCopy];
-    if (!ids) { [self fail:@"Нет module-identifiers в конфиге"]; CXDebugLog(@"+: конфиг не читается"); return; }
-    [ids addObject:m[@"id"]];
-    if (!CXWriteModuleIDs(ids)) { [self fail:@"Запись конфига не удалась"]; CXDebugLog(@"+: запись не удалась"); return; }
-    CXDebugLog([NSString stringWithFormat:@"+: %@  было %lu → стало %lu",
-                CXShortID(m[@"id"]), (unsigned long)before.count, (unsigned long)CXReadModuleIDs().count]);
+    NSString *res = CXAddModule(m[@"id"]);
+    CXDebugLog(res);
 
     // Респринга здесь нет: можно добавить несколько модулей подряд.
     // Применится по кнопке «Применить» в Control Center.

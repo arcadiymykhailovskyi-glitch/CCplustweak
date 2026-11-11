@@ -28,3 +28,10 @@ NSString *CXShortID(NSString *ident);
 NSString *CXMatchModuleID(NSString *ident, NSArray<NSString *> *ids);
 // Подробный отчёт для отладки (конфиг, список файлов, показанные модули, рантайм-данные CC)
 NSString *CXBuildReport(NSArray<NSString *> *shownIDs);
+
+// Официальный путь изменения списка модулей (через CCSModuleSettingsProvider + живое обновление менеджера)
+// ok = YES, если модуль можно было убрать. Возвращает строку-отчёт для панели.
+NSString *CXRemoveModule(NSString *ident, BOOL *ok);
+NSString *CXAddModule(NSString *ident);
+// Всё, что сейчас включено/зафиксировано (live + настройки)
+NSSet<NSString *> *CXCurrentEnabledIDs(void);
