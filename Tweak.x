@@ -10,6 +10,7 @@ enum { kTagPlus = 7001, kTagDone = 7002, kTagBadge = 7003 };
 - (void)cx_setEditing:(BOOL)on;
 - (void)cx_plusTapped;
 - (void)cx_doneTapped;
+- (void)cx_refreshDone;
 - (void)cx_longPressed:(UILongPressGestureRecognizer *)g;
 @end
 
@@ -34,7 +35,7 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
     return b;
 }
 
-// ---------- Оверлей Control Center: долгий тап, «+» и «Готово» ----------
+// ---------- Оверлей Control Center: долгий тап, «+» и «Готово / Применить» ----------
 
 %hook CCUIModularControlCenterOverlayViewController
 
@@ -62,11 +63,17 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
         [done.topAnchor constraintEqualToAnchor:g.topAnchor constant:8],
         [done.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
     ]];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(cx_refreshDone)
+                                                 name:CXPendingNote object:nil];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     %orig;
-    if (!self.presentedViewController) [self cx_setEditing:NO];
+    if (self.presentedViewController) return;     // открыта шторка «+», CC не закрывается
+    if (CXHasPending()) CXRespring();              // применяем накопленные изменения
+    else [self cx_setEditing:NO];
 }
 
 %new
@@ -84,11 +91,22 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
         v.hidden = !on;
         if (on) [root bringSubviewToFront:v];
     }
+    [self cx_refreshDone];
     [[NSNotificationCenter defaultCenter] postNotificationName:kEditNote object:nil];
 }
 
 %new
+- (void)cx_refreshDone {
+    UIButton *done = (UIButton *)[self.view viewWithTag:kTagDone];
+    BOOL pending = CXHasPending();
+    [done setTitle:(pending ? @"Применить" : @"Готово") forState:UIControlStateNormal];
+    done.backgroundColor = pending ? [UIColor colorWithRed:0.20 green:0.70 blue:0.35 alpha:0.95]
+                                   : [UIColor colorWithWhite:1.0 alpha:0.25];
+}
+
+%new
 - (void)cx_doneTapped {
+    if (CXHasPending()) { CXRespring(); return; }  // один респринг на все изменения
     [self cx_setEditing:NO];
 }
 
@@ -126,8 +144,15 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
     if (![self respondsToSelector:@selector(moduleIdentifier)]) return;
     UIView *v = self.view;
     UIButton *badge = (UIButton *)[v viewWithTag:kTagBadge];
+    BOOL removed = CXIsRemoved([self moduleIdentifier]);
 
-    if (gEditing) {
+    if (gEditing && removed) {
+        // Уже удалён из конфига: гасим модуль до респринга
+        [badge removeFromSuperview];
+        [v.layer removeAnimationForKey:@"cx_wobble"];
+        v.userInteractionEnabled = NO;
+        v.alpha = 0.2;
+    } else if (gEditing) {
         if (!badge) {
             badge = [UIButton buttonWithType:UIButtonTypeSystem];
             badge.tag = kTagBadge;
@@ -164,7 +189,11 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
     NSMutableArray *ids = [CXReadModuleIDs() mutableCopy];
     if (!ident || !ids) return;
     [ids removeObject:ident];
-    if (CXWriteModuleIDs(ids)) CXRespring();
+    if (!CXWriteModuleIDs(ids)) return;
+
+    // Респринга нет: модуль гаснет, изменения применятся по «Применить»
+    CXMarkRemoved(ident);
+    [self cx_updateBadge];
 }
 
 %end

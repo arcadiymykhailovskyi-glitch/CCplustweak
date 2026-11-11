@@ -117,7 +117,11 @@
     [ids addObject:m[@"id"]];
     if (!CXWriteModuleIDs(ids)) { [self fail:@"Не удалось записать ModuleConfiguration.plist."]; return; }
 
-    [self dismissViewControllerAnimated:YES completion:^{ CXRespring(); }];
+    // Респринга здесь нет: можно добавить несколько модулей подряд.
+    // Применится по кнопке «Применить» в Control Center.
+    CXMarkAdded(m[@"id"]);
+    self.current = [self.current setByAddingObject:m[@"id"]];
+    [tv reloadRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)fail:(NSString *)msg {

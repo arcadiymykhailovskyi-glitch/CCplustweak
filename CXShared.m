@@ -86,3 +86,31 @@ void CXRespring(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ exit(0); });
 }
+
+// ---------- Отложенные изменения ----------
+
+NSString *const CXPendingNote = @"com.ccplus.pendingChanged";
+static BOOL gPending = NO;
+static NSMutableSet<NSString *> *gRemoved = nil;
+
+BOOL CXHasPending(void) { return gPending; }
+
+void CXMarkPending(void) {
+    gPending = YES;
+    [[NSNotificationCenter defaultCenter] postNotificationName:CXPendingNote object:nil];
+}
+
+void CXMarkRemoved(NSString *ident) {
+    if (!gRemoved) gRemoved = [NSMutableSet new];
+    if (ident) [gRemoved addObject:ident];
+    CXMarkPending();
+}
+
+void CXMarkAdded(NSString *ident) {
+    if (ident) [gRemoved removeObject:ident];
+    CXMarkPending();
+}
+
+BOOL CXIsRemoved(NSString *ident) {
+    return ident && [gRemoved containsObject:ident];
+}
