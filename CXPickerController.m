@@ -124,10 +124,13 @@
     NSDictionary *m = [self moduleAt:ip];
     if ([self.current containsObject:m[@"id"]]) return; // уже добавлен
 
-    NSMutableArray *ids = [CXReadModuleIDs() mutableCopy];
-    if (!ids) { [self fail:@"Не удалось прочитать ModuleConfiguration.plist (ключ module-identifiers не найден)."]; return; }
+    NSArray *before = CXReadModuleIDs();
+    NSMutableArray *ids = [before mutableCopy];
+    if (!ids) { [self fail:@"Нет module-identifiers в конфиге"]; CXDebugLog(@"+: конфиг не читается"); return; }
     [ids addObject:m[@"id"]];
-    if (!CXWriteModuleIDs(ids)) { [self fail:@"Не удалось записать ModuleConfiguration.plist."]; return; }
+    if (!CXWriteModuleIDs(ids)) { [self fail:@"Запись конфига не удалась"]; CXDebugLog(@"+: запись не удалась"); return; }
+    CXDebugLog([NSString stringWithFormat:@"+: %@  было %lu → стало %lu",
+                CXShortID(m[@"id"]), (unsigned long)before.count, (unsigned long)CXReadModuleIDs().count]);
 
     // Респринга здесь нет: можно добавить несколько модулей подряд.
     // Применится по кнопке «Применить» в Control Center.

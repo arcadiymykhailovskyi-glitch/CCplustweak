@@ -114,3 +114,42 @@ void CXMarkAdded(NSString *ident) {
 BOOL CXIsRemoved(NSString *ident) {
     return ident && [gRemoved containsObject:ident];
 }
+
+// ---------- Диагностика ----------
+
+NSString *const CXDebugNote = @"com.ccplus.debug";
+static NSString *gLastDebug = @"—";
+
+void CXDebugLog(NSString *msg) {
+    gLastDebug = msg ?: @"";
+    NSLog(@"[CCPlus] %@", gLastDebug);
+    [[NSNotificationCenter defaultCenter] postNotificationName:CXDebugNote object:nil];
+}
+
+NSString *CXLastDebug(void) { return gLastDebug; }
+
+NSString *CXShortID(NSString *ident) {
+    NSString *t = [[ident componentsSeparatedByString:@"."] lastObject];
+    if ([t hasSuffix:@"Module"] && t.length > 6) t = [t substringToIndex:t.length - 6];
+    return t ?: ident;
+}
+
+NSString *CXConfigSummary(void) {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kConfigPath];
+    if (!d) return @"cfg: файл НЕ читается";
+    NSArray *ids = d[kIDsKey];
+    if (![ids isKindOfClass:NSArray.class]) {
+        return [NSString stringWithFormat:@"cfg: нет module-identifiers; ключи: %@", [d.allKeys componentsJoinedByString:@","]];
+    }
+    NSMutableArray *short_ = [NSMutableArray new];
+    for (NSString *i in ids) [short_ addObject:CXShortID(i)];
+    return [NSString stringWithFormat:@"cfg ids(%lu): %@", (unsigned long)ids.count, [short_ componentsJoinedByString:@","]];
+}
+
+NSString *CXMatchModuleID(NSString *ident, NSArray<NSString *> *ids) {
+    if (!ident) return nil;
+    if ([ids containsObject:ident]) return ident;
+    NSString *a = CXShortID(ident);
+    for (NSString *i in ids) if ([CXShortID(i) isEqualToString:a]) return i;
+    return nil;
+}

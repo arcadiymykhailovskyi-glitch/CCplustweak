@@ -17,3 +17,12 @@ void CXMarkPending(void);
 void CXMarkRemoved(NSString *ident);
 void CXMarkAdded(NSString *ident);
 BOOL CXIsRemoved(NSString *ident);
+
+// Диагностика (показывается маленькой панелью внизу в режиме редактирования)
+extern NSString *const CXDebugNote;
+void CXDebugLog(NSString *msg);
+NSString *CXLastDebug(void);
+NSString *CXConfigSummary(void);
+NSString *CXShortID(NSString *ident);
+// Находит в списке идентификатор, соответствующий ident (точно или по хвосту), иначе nil
+NSString *CXMatchModuleID(NSString *ident, NSArray<NSString *> *ids);

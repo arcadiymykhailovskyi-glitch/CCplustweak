@@ -18,12 +18,21 @@ enum { kTagPlus = 7001, kTagDone = 7002, kTagBadge = 7003 };
 
 static CXHostView *gHost = nil;
 static CXPickerController *gSheet = nil;
+static UILabel *gDbg = nil;
+static int tPlus = 0, tDone = 0, tMinus = 0;
+
+static void CXRefreshDbg(void) {
+    if (!gDbg) return;
+    gDbg.text = [NSString stringWithFormat:@"CCPlus  касания: +%d  ✓%d  −%d\n%@\n%@",
+                 tPlus, tDone, tMinus, CXLastDebug(), CXConfigSummary()];
+}
 
 @interface CCUIModularControlCenterOverlayViewController : UIViewController
 - (void)cx_setEditing:(BOOL)on;
 - (void)cx_plusTapped;
 - (void)cx_doneTapped;
 - (void)cx_refreshDone;
+- (void)cx_refreshDbg;
 - (void)cx_longPressed:(UILongPressGestureRecognizer *)g;
 @end
 
@@ -62,6 +71,9 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(cx_refreshDone)
                                                  name:CXPendingNote object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(cx_refreshDbg)
+                                                 name:CXDebugNote object:nil];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -102,9 +114,26 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
             [done.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         ]];
 
+        UILabel *dbg = [UILabel new];
+        dbg.numberOfLines = 0;
+        dbg.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+        dbg.textColor = UIColor.whiteColor;
+        dbg.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+        dbg.layer.cornerRadius = 6;
+        dbg.clipsToBounds = YES;
+        dbg.translatesAutoresizingMaskIntoConstraints = NO;
+        [host addSubview:dbg];
+        [NSLayoutConstraint activateConstraints:@[
+            [dbg.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:8],
+            [dbg.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-8],
+            [dbg.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-4],
+        ]];
+        gDbg = dbg;
+
         [parent addSubview:host];
         gHost = host;
         [self cx_refreshDone];
+        CXRefreshDbg();
     } else {
         if (gSheet) {
             [gSheet.view removeFromSuperview];
@@ -113,6 +142,7 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
         }
         [gHost removeFromSuperview];
         gHost = nil;
+        gDbg = nil;
     }
     [[NSNotificationCenter defaultCenter] postNotificationName:kEditNote object:nil];
 }
@@ -127,15 +157,22 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 }
 
 %new
+- (void)cx_refreshDbg {
+    CXRefreshDbg();
+}
+
+%new
 - (void)cx_doneTapped {
-    NSLog(@"[CCPlus] done tapped, pending=%d", CXHasPending());
+    tDone++;
+    CXDebugLog([NSString stringWithFormat:@"Применить/Готово нажато, pending=%d", CXHasPending()]);
     if (CXHasPending()) { CXRespring(); return; }  // один респринг на все изменения
     [self cx_setEditing:NO];
 }
 
 %new
 - (void)cx_plusTapped {
-    NSLog(@"[CCPlus] plus tapped");
+    tPlus++;
+    CXDebugLog(@"«+» нажато, открываю шторку");
     if (!gHost || gSheet) return;
 
     CXPickerController *vc = [CXPickerController new];
@@ -223,12 +260,22 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 
 %new
 - (void)cx_removeTapped {
+    tMinus++;
     NSString *ident = [self moduleIdentifier];
-    NSMutableArray *ids = [CXReadModuleIDs() mutableCopy];
-    if (!ident || !ids) return;
-    [ids removeObject:ident];
-    if (!CXWriteModuleIDs(ids)) return;
+    NSArray *cur = CXReadModuleIDs();
+    if (!ident || !cur) { CXDebugLog(@"−: нет ident или конфига"); return; }
 
+    NSString *match = CXMatchModuleID(ident, cur);
+    if (!match) {
+        CXDebugLog([NSString stringWithFormat:@"−: «%@» не найден в конфиге", ident]);
+        return;   // не гасим модуль, если реально ничего не удалили
+    }
+    NSMutableArray *ids = [cur mutableCopy];
+    [ids removeObject:match];
+    if (!CXWriteModuleIDs(ids)) { CXDebugLog(@"−: запись не удалась"); return; }
+
+    CXDebugLog([NSString stringWithFormat:@"−: %@  было %lu → стало %lu",
+                CXShortID(match), (unsigned long)cur.count, (unsigned long)CXReadModuleIDs().count]);
     // Респринга нет: модуль гаснет, изменения применятся по «Применить»
     CXMarkRemoved(ident);
     [self cx_updateBadge];
