@@ -1,42 +1,18 @@
 name: Build Rootless Deb
-
-on:
-  push:
-    branches: [ main, master ]
-  workflow_dispatch:
-
+on: [push, workflow_dispatch]
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: macos-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Dependencies & Clone Theos
+      - uses: actions/checkout@v4
+      - run: brew install ldid dpkg make
+      - run: git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+      - name: Build
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dpkg fakeroot git curl zstd make
-
-          # Удаляем старый мусор, если остался
-          rm -rf $GITHUB_WORKSPACE/theos
-
-          # Клонируем официальный Theos со всеми сабмодулями прямо в рабочую папку проекта
-          git clone --recursive https://github.com/theos/theos.git $GITHUB_WORKSPACE/theos
-
-          # Клонируем актуальные SDK
-          rm -rf $GITHUB_WORKSPACE/theos/sdks
-          git clone https://github.com/theos/sdks.git $GITHUB_WORKSPACE/theos/sdks
-
-      - name: Build Tweak for Dopamine (Rootless)
-        run: |
-          export THEOS=$GITHUB_WORKSPACE/theos
-          export PATH="$THEOS/bin:$PATH"
-          make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-
-      - name: Upload DEB Artifact
-        uses: actions/upload-artifact@v4
+          export THEOS="$HOME/theos"
+          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
+          make package FINALPACKAGE=1
+      - uses: actions/upload-artifact@v4
         with:
           name: CCPlus-deb
           path: packages/*.deb
