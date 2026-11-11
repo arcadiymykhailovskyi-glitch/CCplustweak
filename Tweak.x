@@ -19,11 +19,12 @@ enum { kTagPlus = 7001, kTagDone = 7002, kTagBadge = 7003 };
 static CXHostView *gHost = nil;
 static CXPickerController *gSheet = nil;
 static UILabel *gDbg = nil;
+static NSMutableOrderedSet<NSString *> *gShown = nil;
 static int tPlus = 0, tDone = 0, tMinus = 0;
 
 static void CXRefreshDbg(void) {
     if (!gDbg) return;
-    gDbg.text = [NSString stringWithFormat:@"CCPlus  касания: +%d  ✓%d  −%d\n%@\n%@",
+    gDbg.text = [NSString stringWithFormat:@"CCPlus  касания: +%d  ✓%d  −%d  (тап по панели = копировать отчёт)\n%@\n%@",
                  tPlus, tDone, tMinus, CXLastDebug(), CXConfigSummary()];
 }
 
@@ -33,6 +34,7 @@ static void CXRefreshDbg(void) {
 - (void)cx_doneTapped;
 - (void)cx_refreshDone;
 - (void)cx_refreshDbg;
+- (void)cx_copyReport;
 - (void)cx_longPressed:(UILongPressGestureRecognizer *)g;
 @end
 
@@ -122,6 +124,8 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
         dbg.layer.cornerRadius = 6;
         dbg.clipsToBounds = YES;
         dbg.translatesAutoresizingMaskIntoConstraints = NO;
+        dbg.userInteractionEnabled = YES;
+        [dbg addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(cx_copyReport)]];
         [host addSubview:dbg];
         [NSLayoutConstraint activateConstraints:@[
             [dbg.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:8],
@@ -159,6 +163,13 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 %new
 - (void)cx_refreshDbg {
     CXRefreshDbg();
+}
+
+%new
+- (void)cx_copyReport {
+    NSString *r = CXBuildReport(gShown.array ?: @[]);
+    UIPasteboard.generalPasteboard.string = r;
+    CXDebugLog([NSString stringWithFormat:@"Отчёт СКОПИРОВАН (%lu симв.)", (unsigned long)r.length]);
 }
 
 %new
@@ -217,6 +228,8 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 %new
 - (void)cx_updateBadge {
     if (![self respondsToSelector:@selector(moduleIdentifier)]) return;
+    NSString *sid = [self moduleIdentifier];
+    if (sid) { if (!gShown) gShown = [NSMutableOrderedSet new]; [gShown addObject:sid]; }
     UIView *v = self.view;
     UIButton *badge = (UIButton *)[v viewWithTag:kTagBadge];
     BOOL removed = CXIsRemoved([self moduleIdentifier]);

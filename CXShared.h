@@ -26,3 +26,5 @@ NSString *CXConfigSummary(void);
 NSString *CXShortID(NSString *ident);
 // Находит в списке идентификатор, соответствующий ident (точно или по хвосту), иначе nil
 NSString *CXMatchModuleID(NSString *ident, NSArray<NSString *> *ids);
+// Подробный отчёт для отладки (конфиг, список файлов, показанные модули, рантайм-данные CC)
+NSString *CXBuildReport(NSArray<NSString *> *shownIDs);
