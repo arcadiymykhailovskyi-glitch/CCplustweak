@@ -30,5 +30,11 @@ void CXPlanToggleRemove(NSString *ident);
 void CXPlanToggleAdd(NSString *ident);
 void CXPlanSetOrder(NSArray<NSString *> *order);
 NSArray<NSString *> *CXPlanOrder(void);
-void CXPlanReset(void);    // отмена всех изменений
-void CXPlanCommit(void);   // записать всё и перезапустить SpringBoard
+void CXPlanReset(void);    // отмена всех изменений (откат визуально)
+void CXPlanClear(void);    // очистить план после успешного применения
+NSArray<NSString *> *CXPlanRemovedList(void);
+NSArray<NSString *> *CXPlanAddedList(void);
+// Записывает план и пробует применить его «вживую», без респринга.
+// Возвращает YES, если без респринга не обойтись (изменён порядок модулей).
+BOOL CXPlanApplyLive(void);
+void CXRespringNow(void);

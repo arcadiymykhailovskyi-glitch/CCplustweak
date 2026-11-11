@@ -73,8 +73,8 @@ void CXDebugLog(NSString *msg) {
     NSLog(@"[CCPlus] %@", msg);
 }
 
-static void CXRespring(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+void CXRespringNow(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ exit(0); });
 }
 
@@ -204,53 +204,56 @@ BOOL CXIsMovable(NSString *ident) {
 }
 
 NSArray<NSDictionary *> *CXAvailableModules(void) {
+    // 1. Названия из bundle-ов Control Center
     NSArray *dirs = @[@"/System/Library/ControlCenter/Bundles",
                       @"/var/jb/Library/ControlCenter/Bundles",
                       @"/Library/ControlCenter/Bundles"];
-    NSMutableDictionary *seen = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, NSString *> *bundleNames = [NSMutableDictionary new];
     NSFileManager *fm = NSFileManager.defaultManager;
-
     for (NSString *dir in dirs) {
         for (NSString *file in [fm contentsOfDirectoryAtPath:dir error:nil]) {
             if (![file hasSuffix:@".bundle"]) continue;
             NSBundle *b = [NSBundle bundleWithPath:[dir stringByAppendingPathComponent:file]];
             NSString *ident = b.bundleIdentifier;
-            if (!ident || seen[ident]) continue;
-
-            NSString *key = CXKey(ident);
-            NSString *name = CXRussianName(key);
-            if (!name) {
-                name = [b objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [b objectForInfoDictionaryKey:@"CFBundleName"];
-                if (![name isKindOfClass:NSString.class] || !name.length) name = CXShortID(ident);
-            }
-            seen[ident] = @{ @"id": ident, @"name": name,
-                             @"category": CXCategoryFor(key), @"icon": CXIconFor(key) };
+            if (!ident || bundleNames[ident]) continue;
+            NSString *name = [b objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [b objectForInfoDictionaryKey:@"CFBundleName"];
+            if ([name isKindOfClass:NSString.class] && name.length) bundleNames[ident] = name;
+            else bundleNames[ident] = CXShortID(ident);
         }
     }
 
-    // Модули, которые Control Center реально может загрузить
+    // 2. Что Control Center реально может загрузить на этом устройстве.
+    //    Показываем ТОЛЬКО такие модули, иначе часть плиток «добавляется», но на экране не появляется.
+    NSArray *ids = nil;
     id repo = CXIvarOfClass(CXManager(), @"CCSModuleRepository");
     SEL loadSel = NSSelectorFromString(@"loadableModuleIdentifiers");
     if (repo && [repo respondsToSelector:loadSel]) {
-        @try {
-            for (id ident in CXArrayFrom(CXCallGetter(repo, loadSel))) {
-                if (![ident isKindOfClass:NSString.class] || seen[ident]) continue;
-                NSString *key = CXKey(ident);
-                seen[ident] = @{ @"id": ident, @"name": CXRussianName(key) ?: CXShortID(ident),
-                                 @"category": CXCategoryFor(key), @"icon": CXIconFor(key) };
-            }
-        } @catch (NSException *e) {}
+        @try { ids = CXArrayFrom(CXCallGetter(repo, loadSel)); } @catch (NSException *e) { ids = nil; }
     }
+    if (ids.count == 0) ids = bundleNames.allKeys;   // запасной вариант
 
-    // Фиксированные модули (Связь, Яркость и т.п.) добавлять нельзя
+    // 3. Фиксированные модули (Связь, Яркость и т.п.) добавлять нельзя
     id prov = CXNewProvider();
     NSArray *fixed = CXProvList(prov, @"orderedFixedModuleIdentifiers");
     NSArray *userFixed = CXProvList(prov, @"orderedUserEnabledFixedModuleIdentifiers");
-    for (NSString *f in fixed) if (![userFixed containsObject:f]) [seen removeObjectForKey:f];
 
+    NSMutableArray *result = [NSMutableArray new];
+    NSMutableSet *seen = [NSMutableSet new];
+    for (id obj in ids) {
+        if (![obj isKindOfClass:NSString.class]) continue;
+        NSString *ident = obj;
+        if ([seen containsObject:ident]) continue;
+        [seen addObject:ident];
+        if ([fixed containsObject:ident] && ![userFixed containsObject:ident]) continue;
+
+        NSString *key = CXKey(ident);
+        NSString *name = CXRussianName(key) ?: bundleNames[ident] ?: CXShortID(ident);
+        [result addObject:@{ @"id": ident, @"name": name,
+                             @"category": CXCategoryFor(key), @"icon": CXIconFor(key) }];
+    }
     NSSortDescriptor *sd = [NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
                                                          selector:@selector(localizedCaseInsensitiveCompare:)];
-    return [seen.allValues sortedArrayUsingDescriptors:@[sd]];
+    return [result sortedArrayUsingDescriptors:@[sd]];
 }
 
 // ---------- Запись изменений (используется только при «Применить») ----------
@@ -281,7 +284,14 @@ static void CXApplyAdd(NSString *ident) {
     id prov = CXNewProvider();
     NSArray *fx = CXProvList(prov, @"orderedFixedModuleIdentifiers");
     NSArray *ue = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
-    if (![ue containsObject:ident] && ![fx containsObject:ident]) {
+    NSArray *uf = CXProvList(prov, @"orderedUserEnabledFixedModuleIdentifiers");
+    if ([fx containsObject:ident]) {
+        if (![uf containsObject:ident]) {
+            NSMutableArray *n = [uf mutableCopy];
+            [n addObject:ident];
+            CXProvSet(prov, @"setAndSaveOrderedUserEnabledFixedModuleIdentifiers:", n);
+        }
+    } else if (![ue containsObject:ident]) {
         NSMutableArray *n = [ue mutableCopy];
         [n addObject:ident];
         CXProvSet(prov, @"setAndSaveOrderedUserEnabledModuleIdentifiers:", n);
@@ -359,9 +369,27 @@ void CXPlanReset(void) {
     CXPlanPost();
 }
 
-void CXPlanCommit(void) {
+void CXPlanClear(void) {
+    [gPlanRemove removeAllObjects];
+    [gPlanAdd removeAllObjects];
+    gPlanOrder = nil;
+    CXPlanPost();
+}
+
+NSArray<NSString *> *CXPlanRemovedList(void) { return [gPlanRemove array] ?: @[]; }
+NSArray<NSString *> *CXPlanAddedList(void) { return [gPlanAdd array] ?: @[]; }
+
+BOOL CXPlanApplyLive(void) {
+    BOOL hadOrder = gPlanOrder.count > 0;
     for (NSString *r in [gPlanRemove array]) CXApplyRemove(r);
     for (NSString *a in [gPlanAdd array]) CXApplyAdd(a);
-    if (gPlanOrder.count) CXApplyOrder(gPlanOrder);
-    CXRespring();
+    if (hadOrder) CXApplyOrder(gPlanOrder);
+
+    // Просим менеджер модулей пересобрать список
+    id im = CXManager();
+    SEL upd = NSSelectorFromString(@"_updateModuleInstances");
+    if (im && [im respondsToSelector:upd]) {
+        @try { ((void (*)(id, SEL))objc_msgSend)(im, upd); } @catch (NSException *e) {}
+    }
+    return hadOrder;
 }
