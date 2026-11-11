@@ -33,14 +33,26 @@
     self.table.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     self.table.translatesAutoresizingMaskIntoConstraints = NO;
 
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImageSymbolConfiguration *cfg =
+        [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightRegular];
+    [close setImage:[UIImage systemImageNamed:@"xmark.circle.fill" withConfiguration:cfg] forState:UIControlStateNormal];
+    close.tintColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+    [close addTarget:self action:@selector(closeSheet) forControlEvents:UIControlEventTouchUpInside];
+    close.translatesAutoresizingMaskIntoConstraints = NO;
+
     [self.view addSubview:self.search];
+    [self.view addSubview:close];
     [self.view addSubview:self.table];
 
-    UILayoutGuide *g = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [self.search.topAnchor constraintEqualToAnchor:g.topAnchor constant:16],
+        [close.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:12],
+        [close.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [close.widthAnchor constraintEqualToConstant:34],
+        [close.heightAnchor constraintEqualToConstant:34],
+        [self.search.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:8],
         [self.search.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
-        [self.search.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
+        [self.search.trailingAnchor constraintEqualToAnchor:close.leadingAnchor constant:-4],
         [self.table.topAnchor constraintEqualToAnchor:self.search.bottomAnchor],
         [self.table.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.table.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
@@ -125,10 +137,24 @@
 }
 
 - (void)fail:(NSString *)msg {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"CCPlus" message:msg
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:a animated:YES completion:nil];
+    NSLog(@"[CCPlus] %@", msg);
+    self.search.placeholder = msg;
+}
+
+- (void)closeSheet {
+    UIView *v = self.view;
+    if (!v.superview) return;
+    [self.search resignFirstResponder];
+    CGRect f = v.frame;
+    f.origin.y = v.superview.bounds.size.height;
+    [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        v.frame = f;
+    } completion:^(BOOL done) {
+        [self willMoveToParentViewController:nil];
+        [v removeFromSuperview];
+        [self removeFromParentViewController];
+        if (self.onClose) self.onClose();
+    }];
 }
 
 @end

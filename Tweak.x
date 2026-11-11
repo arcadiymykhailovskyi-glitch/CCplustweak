@@ -6,6 +6,19 @@ static BOOL gEditing = NO;
 static NSString *const kEditNote = @"com.ccplus.editChanged";
 enum { kTagPlus = 7001, kTagDone = 7002, kTagBadge = 7003 };
 
+// Прозрачный слой поверх всего окна Control Center: пропускает касания, кроме своих кнопок/шторки
+@interface CXHostView : UIView
+@end
+@implementation CXHostView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *v = [super hitTest:point withEvent:event];
+    return (v == self) ? nil : v;
+}
+@end
+
+static CXHostView *gHost = nil;
+static CXPickerController *gSheet = nil;
+
 @interface CCUIModularControlCenterOverlayViewController : UIViewController
 - (void)cx_setEditing:(BOOL)on;
 - (void)cx_plusTapped;
@@ -31,7 +44,6 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
     if (symbol) [b setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
     if (title) [b setTitle:title forState:UIControlStateNormal];
     b.translatesAutoresizingMaskIntoConstraints = NO;
-    b.hidden = YES;
     return b;
 }
 
@@ -41,28 +53,11 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 
 - (void)viewDidLoad {
     %orig;
-    UIView *root = self.view;
-
     UILongPressGestureRecognizer *lp =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(cx_longPressed:)];
     lp.minimumPressDuration = 0.9;
     lp.cancelsTouchesInView = NO;
-    [root addGestureRecognizer:lp];
-
-    UIButton *plus = CXPill(nil, @"plus", kTagPlus);
-    [plus addTarget:self action:@selector(cx_plusTapped) forControlEvents:UIControlEventTouchUpInside];
-    UIButton *done = CXPill(@"Готово", nil, kTagDone);
-    [done addTarget:self action:@selector(cx_doneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [root addSubview:plus];
-    [root addSubview:done];
-
-    UILayoutGuide *g = root.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
-        [plus.topAnchor constraintEqualToAnchor:g.topAnchor constant:8],
-        [plus.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [done.topAnchor constraintEqualToAnchor:g.topAnchor constant:8],
-        [done.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
-    ]];
+    [self.view addGestureRecognizer:lp];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(cx_refreshDone)
@@ -71,8 +66,7 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 
 - (void)viewWillDisappear:(BOOL)animated {
     %orig;
-    if (self.presentedViewController) return;     // открыта шторка «+», CC не закрывается
-    if (CXHasPending()) CXRespring();              // применяем накопленные изменения
+    if (CXHasPending()) CXRespring();   // закрыли Control Center: применяем накопленные изменения
     else [self cx_setEditing:NO];
 }
 
@@ -85,19 +79,47 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 - (void)cx_setEditing:(BOOL)on {
     if (gEditing == on) return;
     gEditing = on;
-    UIView *root = self.view;
-    for (NSNumber *t in @[@(kTagPlus), @(kTagDone)]) {
-        UIView *v = [root viewWithTag:t.integerValue];
-        v.hidden = !on;
-        if (on) [root bringSubviewToFront:v];
+
+    if (on) {
+        // Кнопки живут не внутри view контроллера, а в верхнем слое окна: так их ничто не перекроет
+        UIView *parent = self.view.window ?: self.view;
+        CXHostView *host = [[CXHostView alloc] initWithFrame:parent.bounds];
+        host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        host.backgroundColor = UIColor.clearColor;
+
+        UIButton *plus = CXPill(nil, @"plus", kTagPlus);
+        [plus addTarget:self action:@selector(cx_plusTapped) forControlEvents:UIControlEventTouchUpInside];
+        UIButton *done = CXPill(@"Готово", nil, kTagDone);
+        [done addTarget:self action:@selector(cx_doneTapped) forControlEvents:UIControlEventTouchUpInside];
+        [host addSubview:plus];
+        [host addSubview:done];
+
+        UILayoutGuide *g = host.safeAreaLayoutGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [plus.topAnchor constraintEqualToAnchor:g.topAnchor constant:8],
+            [plus.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+            [done.topAnchor constraintEqualToAnchor:g.topAnchor constant:8],
+            [done.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+        ]];
+
+        [parent addSubview:host];
+        gHost = host;
+        [self cx_refreshDone];
+    } else {
+        if (gSheet) {
+            [gSheet.view removeFromSuperview];
+            [gSheet removeFromParentViewController];
+            gSheet = nil;
+        }
+        [gHost removeFromSuperview];
+        gHost = nil;
     }
-    [self cx_refreshDone];
     [[NSNotificationCenter defaultCenter] postNotificationName:kEditNote object:nil];
 }
 
 %new
 - (void)cx_refreshDone {
-    UIButton *done = (UIButton *)[self.view viewWithTag:kTagDone];
+    UIButton *done = (UIButton *)[gHost viewWithTag:kTagDone];
     BOOL pending = CXHasPending();
     [done setTitle:(pending ? @"Применить" : @"Готово") forState:UIControlStateNormal];
     done.backgroundColor = pending ? [UIColor colorWithRed:0.20 green:0.70 blue:0.35 alpha:0.95]
@@ -106,19 +128,35 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 
 %new
 - (void)cx_doneTapped {
+    NSLog(@"[CCPlus] done tapped, pending=%d", CXHasPending());
     if (CXHasPending()) { CXRespring(); return; }  // один респринг на все изменения
     [self cx_setEditing:NO];
 }
 
 %new
 - (void)cx_plusTapped {
+    NSLog(@"[CCPlus] plus tapped");
+    if (!gHost || gSheet) return;
+
     CXPickerController *vc = [CXPickerController new];
-    vc.modalPresentationStyle = UIModalPresentationPageSheet;
-    UISheetPresentationController *sheet = vc.sheetPresentationController;
-    sheet.detents = @[UISheetPresentationControllerDetent.mediumDetent,
-                      UISheetPresentationControllerDetent.largeDetent];
-    sheet.prefersGrabberVisible = YES;
-    [self presentViewController:vc animated:YES completion:nil];
+    [self addChildViewController:vc];
+
+    CGRect b = gHost.bounds;
+    CGFloat h = floor(b.size.height * 0.62);
+    vc.view.frame = CGRectMake(0, b.size.height, b.size.width, h);
+    vc.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    vc.view.layer.cornerRadius = 18;
+    vc.view.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+    vc.view.clipsToBounds = YES;
+    [gHost addSubview:vc.view];
+    [vc didMoveToParentViewController:self];
+
+    gSheet = vc;
+    vc.onClose = ^{ gSheet = nil; };
+
+    [UIView animateWithDuration:0.28 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        vc.view.frame = CGRectMake(0, b.size.height - h, b.size.width, h);
+    } completion:nil];
 }
 
 %end
