@@ -256,6 +256,10 @@ NSArray<NSDictionary *> *CXAvailableModules(void) {
     return [result sortedArrayUsingDescriptors:@[sd]];
 }
 
+static NSMutableOrderedSet<NSString *> *gPlanRemove = nil;
+static NSMutableOrderedSet<NSString *> *gPlanAdd = nil;
+static NSArray<NSString *> *gPlanOrder = nil;
+
 // ---------- Запись изменений (используется только при «Применить») ----------
 
 static void CXApplyRemove(NSString *ident) {
@@ -309,16 +313,14 @@ static void CXApplyOrder(NSArray<NSString *> *order) {
     id prov = CXNewProvider();
     NSArray *ue = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
     NSMutableArray *n = [NSMutableArray new];
-    for (NSString *i in order) if ([ue containsObject:i] && ![n containsObject:i]) [n addObject:i];
-    for (NSString *i in ue) if (![n containsObject:i]) [n addObject:i];
+    // сначала всё, что видно на экране, в новом порядке; потом остальное из старого списка
+    for (NSString *i in order) if (![n containsObject:i] && ![gPlanRemove containsObject:i]) [n addObject:i];
+    for (NSString *i in ue) if (![n containsObject:i] && ![gPlanRemove containsObject:i]) [n addObject:i];
     CXProvSet(prov, @"setAndSaveOrderedUserEnabledModuleIdentifiers:", n);
 }
 
 // ---------- План изменений ----------
 
-static NSMutableOrderedSet<NSString *> *gPlanRemove = nil;
-static NSMutableOrderedSet<NSString *> *gPlanAdd = nil;
-static NSArray<NSString *> *gPlanOrder = nil;
 
 static void CXPlanEnsure(void) {
     if (!gPlanRemove) gPlanRemove = [NSMutableOrderedSet new];
