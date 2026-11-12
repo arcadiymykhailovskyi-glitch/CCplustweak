@@ -16,7 +16,7 @@ static NSMutableArray<UIGestureRecognizer *> *gSuspended = nil;
 
 // Состояние перетаскивания (одновременно двигается только один модуль)
 static CGAffineTransform gDragBase;
-static CGPoint gDragStartCenter, gDragHome, gDragLoc0;
+static CGPoint gDragHome, gDragLoc0;
 static __weak UILongPressGestureRecognizer *gDragGR = nil;
 static CADisplayLink *gDragLink = nil;
 static __weak UIScrollView *gDragScroll = nil;
@@ -109,6 +109,8 @@ static void CXSuspendCCGestures(UIView *rootView, BOOL suspend) {
 - (void)cx_refreshEdit;
 - (void)cx_planChanged;
 - (void)cx_setSystemGestures:(BOOL)enable;
+- (void)cx_ovLong:(UILongPressGestureRecognizer *)g;
+- (void)cx_ovTap:(UITapGestureRecognizer *)g;
 @end
 
 static UIColor *CXGreen(void) {
@@ -133,8 +135,21 @@ static void CXHaptic(void) {
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
 }
 
+static NSString *gLastToggleId = nil;
+static CFTimeInterval gLastToggleT = 0;
+
+// Тап по «−» могут поймать сразу два обработчика: защищаемся от двойного срабатывания
+static void CXToggleRemoveOnce(NSString *ident) {
+    CFTimeInterval now = CACurrentMediaTime();
+    if ([ident isEqualToString:gLastToggleId] && now - gLastToggleT < 0.35) return;
+    gLastToggleId = ident;
+    gLastToggleT = now;
+    CXHaptic();
+    CXPlanToggleRemove(ident);
+}
+
 // Короткая подсказка внизу экрана
-static void CXToast(NSString *text) {
+static void CXToastFor(NSString *text, double hold) {
     if (!gHost) return;
     UILabel *l = [UILabel new];
     l.text = text;
@@ -150,10 +165,12 @@ static void CXToast(NSString *text) {
     l.alpha = 0;
     [gHost addSubview:l];
     [UIView animateWithDuration:0.2 animations:^{ l.alpha = 1; } completion:^(BOOL f) {
-        [UIView animateWithDuration:0.3 delay:1.4 options:0 animations:^{ l.alpha = 0; }
+        [UIView animateWithDuration:0.3 delay:hold options:0 animations:^{ l.alpha = 0; }
                          completion:^(BOOL f2) { [l removeFromSuperview]; }];
     }];
 }
+
+static void CXToast(NSString *text) { CXToastFor(text, 1.4); }
 
 // Модуль сейчас показан на экране
 static BOOL CXIsShown(NSString *ident) {
@@ -216,6 +233,15 @@ static CCUIContentModuleContainerViewController *CXModuleAtPoint(UIView *host, C
         if (CGRectContainsPoint(r, p)) return (CCUIContentModuleContainerViewController *)o;
     }
     return nil;
+}
+
+// Отключаем все жесты в поддереве вида (кроме нашего слоя редактирования)
+static void CXDisableGesturesIn(UIView *root, NSMutableArray *out) {
+    if ([root isKindOfClass:CXEditOverlay.class]) return;
+    for (UIGestureRecognizer *gr in root.gestureRecognizers) {
+        if (gr.enabled) { gr.enabled = NO; [out addObject:gr]; }
+    }
+    for (UIView *sub in root.subviews) CXDisableGesturesIn(sub, out);
 }
 
 // ---------- Страницы ----------
@@ -343,8 +369,64 @@ static void CXUpdateDots(NSInteger count, NSInteger current) {
 }
 
 // ---------- Перетаскивание ----------
+//
+// Как в iOS 18: палец держит поднятый модуль, остальные плавно «расступаются» и занимают соседние места.
+// Меняются местами только модули одного размера: каждый такой модуль занимает один из «слотов»
+// (его место на сетке), а при перетаскивании идёт вставка в нужный слот со сдвигом остальных.
 
-// Один «кадр» перетаскивания: палец ведёт модуль, а модуль под ним уступает место
+static NSMutableArray<UIViewController *> *gGroupVCs = nil;                 // модули группы
+static NSMutableArray<NSValue *> *gSlotCenters = nil;                       // центры слотов (сверху вниз, слева направо)
+static NSMutableArray<NSString *> *gGroupIdents = nil;                      // кто сейчас в каком слоте
+static NSMutableDictionary<NSString *, NSValue *> *gBaseCenters = nil;      // собственный центр модуля без сдвигов
+static NSInteger gDragSlot = 0;
+
+// Собираем группу модулей того же размера, что и тащимый
+static BOOL CXBuildGroup(CCUIContentModuleContainerViewController *vc) {
+    UIView *sup = vc.view.superview;
+    if (!sup) return NO;
+    CGSize sz = CXBaseFrame(vc.view).size;
+
+    NSMutableArray<NSDictionary *> *items = [NSMutableArray new];
+    for (UIViewController *o in gContainers.allObjects) {
+        if (!o.isViewLoaded || o.view.superview != sup) continue;
+        NSString *oid = [(CCUIContentModuleContainerViewController *)o moduleIdentifier];
+        if (!oid || !CXIsRemovable(oid) || CXPlanIsRemoved(oid)) continue;
+        CGRect f = CXBaseFrame(o.view);
+        if (fabs(f.size.width - sz.width) > 2 || fabs(f.size.height - sz.height) > 2) continue;
+        [items addObject:@{ @"vc": o, @"id": oid,
+                            @"y": @(round(f.origin.y)), @"x": @(f.origin.x),
+                            @"c": [NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f))] }];
+    }
+    if (items.count < 2) return NO;
+    [items sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSComparisonResult r = [a[@"y"] compare:b[@"y"]];
+        return r != NSOrderedSame ? r : [a[@"x"] compare:b[@"x"]];
+    }];
+
+    gGroupVCs = [NSMutableArray new];
+    gSlotCenters = [NSMutableArray new];
+    gBaseCenters = [NSMutableDictionary new];
+    NSMutableSet<NSString *> *groupIds = [NSMutableSet new];
+    for (NSDictionary *d in items) {
+        [gGroupVCs addObject:d[@"vc"]];
+        [gSlotCenters addObject:d[@"c"]];
+        gBaseCenters[d[@"id"]] = d[@"c"];
+        [groupIds addObject:d[@"id"]];
+    }
+
+    // Кто в каком слоте сейчас: по уже накопленному порядку (если модули уже двигали), иначе по сетке
+    NSArray<NSString *> *order = CXPlanOrder() ?: CXVisualOrder(sup);
+    gGroupIdents = [NSMutableArray new];
+    for (NSString *i in order) if ([groupIds containsObject:i]) [gGroupIdents addObject:i];
+    for (NSDictionary *d in items) if (![gGroupIdents containsObject:d[@"id"]]) [gGroupIdents addObject:d[@"id"]];
+
+    NSUInteger me = [gGroupIdents indexOfObject:[vc moduleIdentifier]];
+    if (me == NSNotFound) return NO;
+    gDragSlot = (NSInteger)me;
+    return YES;
+}
+
+// Один «кадр» перетаскивания: палец ведёт модуль, остальные уступают место
 static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
     UILongPressGestureRecognizer *g = gDragGR;
     UIView *v = vc.view;
@@ -353,41 +435,59 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
 
     CGPoint loc = [g locationInView:sup];
     CGAffineTransform tr = CGAffineTransformTranslate(gDragBase, loc.x - gDragLoc0.x, loc.y - gDragLoc0.y);
-    v.transform = CGAffineTransformScale(tr, 1.07, 1.07);
+    v.transform = CGAffineTransformScale(tr, 1.1, 1.1);
+
+    if (gSlotCenters.count < 2) return;
+
+    // Ближайший к модулю слот
+    CGPoint c = CGPointMake(CGRectGetMidX(v.frame), CGRectGetMidY(v.frame));
+    NSInteger target = gDragSlot;
+    CGFloat best = CGFLOAT_MAX;
+    for (NSInteger k = 0; k < (NSInteger)gSlotCenters.count; k++) {
+        CGPoint sc = gSlotCenters[k].CGPointValue;
+        CGFloat d = hypot(c.x - sc.x, c.y - sc.y);
+        if (d < best) { best = d; target = k; }
+    }
+    if (target == gDragSlot) return;
+
+    // Небольшой «гистерезис», чтобы модули не дёргались туда-сюда на границе слотов
+    CGPoint cur = gSlotCenters[gDragSlot].CGPointValue;
+    if (best > hypot(c.x - cur.x, c.y - cur.y) * 0.8) return;
 
     NSString *ident = [vc moduleIdentifier];
-    CGPoint c = CGPointMake(CGRectGetMidX(v.frame), CGRectGetMidY(v.frame));
-    for (UIViewController *o in gContainers.allObjects) {
-        if (o == vc || !o.isViewLoaded || o.view.superview != sup) continue;
-        CCUIContentModuleContainerViewController *oc = (CCUIContentModuleContainerViewController *)o;
-        NSString *oid = [oc moduleIdentifier];
-        if (!oid || !CXIsRemovable(oid) || CXPlanIsRemoved(oid)) continue;
+    NSUInteger from = [gGroupIdents indexOfObject:ident];
+    if (from == NSNotFound) return;
+    [gGroupIdents removeObjectAtIndex:from];
+    [gGroupIdents insertObject:ident atIndex:target];
+    gDragSlot = target;
+    gDragHome = gSlotCenters[target].CGPointValue;
 
-        CGRect f = o.view.frame;
-        if (!CGRectContainsPoint(CGRectInset(f, f.size.width * 0.18, f.size.height * 0.18), c)) continue;
-
-        NSMutableArray *order = [(CXPlanOrder() ?: CXVisualOrder(sup)) mutableCopy];
-        NSUInteger iD = [order indexOfObject:ident];
-        NSUInteger iT = [order indexOfObject:oid];
-        if (iD == NSNotFound || iT == NSNotFound || iD == iT) continue;
-
-        // Поменялись местами: модуль под пальцем плавно уезжает на освободившееся место
-        CGPoint oC = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
-        CGAffineTransform tOld = o.view.transform;
-        [order removeObjectAtIndex:iD];
-        [order insertObject:ident atIndex:iT];
-        CXPlanSetOrder(order);
-
-        CGPoint home = gDragHome;
-        gDragHome = oC;
+    // Остальные плавно занимают новые слоты (вставка со сдвигом, как в iOS 18)
+    for (UIViewController *o in gGroupVCs) {
+        if (o == vc) continue;
+        NSString *oid = [(CCUIContentModuleContainerViewController *)o moduleIdentifier];
+        NSUInteger slot = [gGroupIdents indexOfObject:oid];
+        NSValue *baseV = gBaseCenters[oid];
+        if (slot == NSNotFound || !baseV) continue;
+        CGPoint base = baseV.CGPointValue;
+        CGPoint dest = gSlotCenters[slot].CGPointValue;
         UIView *ov = o.view;
-        [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.3
-                            options:UIViewAnimationOptionAllowUserInteraction
-                         animations:^{ ov.transform = CGAffineTransformTranslate(tOld, home.x - oC.x, home.y - oC.y); }
+        [UIView animateWithDuration:0.42 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.3
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{ ov.transform = CGAffineTransformMakeTranslation(dest.x - base.x, dest.y - base.y); }
                          completion:nil];
-        [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
-        break;
     }
+
+    // Обновляем общий порядок: те же позиции, но группа расставлена по-новому
+    NSMutableArray<NSString *> *order = [(CXPlanOrder() ?: CXVisualOrder(sup)) mutableCopy];
+    NSMutableArray<NSNumber *> *positions = [NSMutableArray new];
+    for (NSUInteger i = 0; i < order.count; i++) if ([gGroupIdents containsObject:order[i]]) [positions addObject:@(i)];
+    for (NSUInteger k = 0; k < positions.count && k < gGroupIdents.count; k++) {
+        order[positions[k].unsignedIntegerValue] = gGroupIdents[k];
+    }
+    // Если модуль вернули на исходное место, изменения по порядку не считаем
+    CXPlanSetOrder([order isEqualToArray:CXVisualOrder(sup)] ? nil : order);
+    [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
 }
 
 // Кадр таймера: автопрокрутка у краёв экрана + движение модуля
@@ -428,11 +528,17 @@ static void CXDragBegin(UILongPressGestureRecognizer *g, CCUIContentModuleContai
     UIView *v = vc.view;
     UIView *sup = v.superview;
     if (!sup) return;
+
+    if (!CXBuildGroup(vc)) {
+        CXHaptic();
+        CXToast(@"Для этого элемента нет другого места такого же размера");
+        return;
+    }
+
     gDragging = vc;
     gDragGR = g;
     gDragBase = v.transform;
-    gDragStartCenter = CGPointMake(CGRectGetMidX(v.frame), CGRectGetMidY(v.frame));
-    gDragHome = gDragStartCenter;
+    gDragHome = gSlotCenters[gDragSlot].CGPointValue;
     gDragLoc0 = [g locationInView:sup];
     gDragScroll = CXFindScrollView();
     [v.layer removeAnimationForKey:@"cx_wobble"];
@@ -442,13 +548,19 @@ static void CXDragBegin(UILongPressGestureRecognizer *g, CCUIContentModuleContai
     if (!gTicker) gTicker = [CXTicker new];
     gDragLink = [CADisplayLink displayLinkWithTarget:gTicker selector:@selector(tick:)];
     [gDragLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    [UIView animateWithDuration:0.2 animations:^{ CXUpdateDrag(vc); }];   // модуль «приподнимается»
+    [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        CXUpdateDrag(vc);          // модуль «приподнимается»
+        v.alpha = 0.92;
+    } completion:nil];
 }
 
 static void CXDragEnd(void) {
     CCUIContentModuleContainerViewController *vc = (CCUIContentModuleContainerViewController *)gDragging;
     if (!vc) return;
     UIView *v = vc.view;
+    NSString *ident = [vc moduleIdentifier];
     gDragging = nil;
     [gDragLink invalidate];
     gDragLink = nil;
@@ -456,13 +568,18 @@ static void CXDragEnd(void) {
     gDragScroll = nil;
     gDragGR = nil;
 
-    // Модуль плавно «садится» на своё (возможно, новое) место
-    CGAffineTransform end = CGAffineTransformTranslate(gDragBase, gDragHome.x - gDragStartCenter.x,
-                                                       gDragHome.y - gDragStartCenter.y);
+    // Модуль плавно «садится» в свой слот
+    CGPoint base = gBaseCenters[ident] ? gBaseCenters[ident].CGPointValue : gDragHome;
+    CGAffineTransform end = CGAffineTransformMakeTranslation(gDragHome.x - base.x, gDragHome.y - base.y);
     [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.3
                         options:UIViewAnimationOptionAllowUserInteraction
-                     animations:^{ v.transform = end; } completion:nil];
+                     animations:^{
+        v.transform = end;
+        v.alpha = 1.0;
+    } completion:nil];
     CXHaptic();
+
+    gGroupVCs = nil; gSlotCenters = nil; gGroupIdents = nil; gBaseCenters = nil;
     [vc cx_refreshEdit];                      // вернуть покачивание
     if (sv) CXSnapScroll(sv, 0);              // страница мягко встаёт на ближайшую «остановку»
 }
@@ -615,6 +732,17 @@ static void CXDragEnd(void) {
         [self cx_refreshButtons];
         [UIView animateWithDuration:0.28 delay:0 options:UIViewAnimationOptionCurveEaseOut
                          animations:^{ host.alpha = 1; } completion:nil];
+
+        // Служебная строка: помогает понять, видит ли твик прокрутку и сколько страниц получилось
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIScrollView *sv = CXFindScrollView();
+            NSUInteger count = 0;
+            for (UIViewController *o in gContainers.allObjects) if (o.isViewLoaded && o.view.window) count++;
+            NSString *msg = sv ? [NSString stringWithFormat:@"модулей: %lu · страниц: %lu · прокрутка: да",
+                                  (unsigned long)count, (unsigned long)CXPageOffsets(sv).count]
+                               : [NSString stringWithFormat:@"модулей: %lu · прокрутка: не найдена", (unsigned long)count];
+            CXToastFor(msg, 3.0);
+        });
     } else {
         if (gSheet) [gSheet closeSheet];
         CXDragEnd();
@@ -637,10 +765,7 @@ static void CXDragEnd(void) {
         NSString *ident = [vc moduleIdentifier];
         CGRect r = [gHost convertRect:vc.view.bounds fromView:vc.view];
         CGRect badge = CGRectMake(r.origin.x - 4, r.origin.y - 4, 46, 46);
-        if (ident && CXIsRemovable(ident) && CGRectContainsPoint(badge, p)) {
-            CXHaptic();
-            CXPlanToggleRemove(ident);
-        }
+        if (ident && CXIsRemovable(ident) && CGRectContainsPoint(badge, p)) CXToggleRemoveOnce(ident);
         return;
     }
     [self cx_emptyTapped];
@@ -834,8 +959,15 @@ static void CXDragEnd(void) {
         ov.tag = kTagOverlay;
         ov.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         ov.backgroundColor = UIColor.clearColor;
-        ov.userInteractionEnabled = NO;
         ov.alpha = 0;
+
+        // Зажать и тащить / тап по «−». Работает параллельно со слоем окна: касание достанется одному из них.
+        UILongPressGestureRecognizer *drag = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(cx_ovLong:)];
+        drag.minimumPressDuration = 0.2;
+        drag.allowableMovement = 10;
+        [ov addGestureRecognizer:drag];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(cx_ovTap:)];
+        [ov addGestureRecognizer:tap];
 
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
         b.tag = kTagBadge;
@@ -907,24 +1039,56 @@ static void CXDragEnd(void) {
 
 %new
 - (void)cx_setSystemGestures:(BOOL)enable {
-    // На время редактирования отключаем системные жесты модуля (раскрытие по долгому нажатию и т.п.)
+    // На время редактирования отключаем ВСЕ системные жесты модуля, включая раскрытие по долгому нажатию
     UIView *v = self.view;
     if (!enable) {
         NSMutableArray *disabled = [NSMutableArray new];
-        NSMutableArray *views = [NSMutableArray arrayWithObject:v];
-        [views addObjectsFromArray:v.subviews];
-        for (UIView *x in views) {
-            if ([x isKindOfClass:CXEditOverlay.class]) continue;
-            for (UIGestureRecognizer *gr in x.gestureRecognizers) {
-                if (gr.enabled) { gr.enabled = NO; [disabled addObject:gr]; }
-            }
-        }
+        CXDisableGesturesIn(v, disabled);
         objc_setAssociatedObject(self, &kGestureStoreKey, disabled, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } else {
         NSArray *disabled = objc_getAssociatedObject(self, &kGestureStoreKey);
         for (UIGestureRecognizer *gr in disabled) gr.enabled = YES;
         objc_setAssociatedObject(self, &kGestureStoreKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+}
+
+%new
+- (void)cx_ovLong:(UILongPressGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateBegan) {
+        if (gDragging || gSheet) return;
+        NSString *ident = [self moduleIdentifier];
+        if (!ident || CXPlanIsRemoved(ident)) return;
+        if (!CXIsRemovable(ident)) {
+            CXHaptic();
+            CXToast(@"Этот элемент закреплён, его нельзя двигать");
+            return;
+        }
+        CXDragBegin(g, (CCUIContentModuleContainerViewController *)self);
+    } else if (g.state == UIGestureRecognizerStateChanged) {
+        if (gDragging == self) CXDragFrame();
+    } else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled ||
+               g.state == UIGestureRecognizerStateFailed) {
+        if (gDragging == self) CXDragEnd();
+    }
+}
+
+%new
+- (void)cx_ovTap:(UITapGestureRecognizer *)g {
+    NSString *ident = [self moduleIdentifier];
+    if (!ident || !CXIsRemovable(ident)) return;
+    CGPoint p = [g locationInView:self.view];
+    if (p.x <= 46 && p.y <= 46) CXToggleRemoveOnce(ident);
+}
+
+%end
+
+// ---------- Раскрытие модуля по долгому нажатию в режиме редактирования запрещено ----------
+
+%hook CCUIModuleInstanceManager
+
+- (void)requestExpandModuleForContentModuleContext:(id)context {
+    if (gEditing) return;
+    %orig;
 }
 
 %end
