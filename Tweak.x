@@ -7,7 +7,7 @@ static BOOL gEditing = NO;
 static NSString *const kEditNote = @"com.ccplus.editChanged";
 enum { kTagPlus = 7001, kTagDone = 7002, kTagCancel = 7003, kTagOverlay = 7010, kTagBadge = 7011 };
 
-static char kGestureStoreKey;
+static char kGestureStoreKey, kSnapKey, kOrigInsetKey;
 
 static CXPickerController *gSheet = nil;
 static NSHashTable<UIViewController *> *gContainers = nil;
@@ -22,11 +22,17 @@ static CADisplayLink *gDragLink = nil;
 static __weak UIScrollView *gDragScroll = nil;
 
 // Страницы и точки-индикатор
-static char kSnapKey, kTopFixKey;
 static CADisplayLink *gPagerLink = nil;
 static NSInteger gDotsCount = 0, gDotsCurrent = -1;
+static BOOL gInitialSnapDone = NO;
 
-// Прозрачный слой, который не перехватывает касания
+// Слой редактирования поверх каждого модуля: только рисует значок «−», касания не принимает
+@interface CXEditOverlay : UIView
+@end
+@implementation CXEditOverlay
+@end
+
+// Прозрачный слой, который не перехватывает касания (точки страниц)
 @interface CXPassView : UIView
 @end
 @implementation CXPassView
@@ -37,38 +43,18 @@ static NSInteger gDotsCount = 0, gDotsCurrent = -1;
 @end
 static CXPassView *gDotsHost = nil;
 
-// Слой редактирования поверх каждого модуля: гасит нажатия на сам модуль
-@interface CXEditOverlay : UIView
-@end
-@implementation CXEditOverlay
-@end
-
-// Есть ли под пальцем слой редактирования какого-нибудь модуля
-static BOOL CXPointInsideModule(UIView *host, CGPoint p) {
-    for (UIViewController *o in gContainers.allObjects) {
-        if (!o.isViewLoaded) continue;
-        UIView *ov = [o.view viewWithTag:kTagOverlay];
-        if (!ov || !ov.window || ov.hidden || ov.alpha < 0.01) continue;
-        CGPoint q = [host convertPoint:p toView:ov];
-        if ([ov pointInside:q withEvent:nil]) return YES;
-    }
-    return NO;
-}
-
-// Прозрачный слой поверх окна Control Center. Пропускает касания только к своим кнопкам,
-// шторке и модулям. Касания в пустом месте «съедает», чтобы Control Center не закрылся резко:
-// тап по пустому месту плавно выходит из режима редактирования.
+// Слой поверх всего окна Control Center в режиме редактирования. Он сам принимает ВСЕ касания
+// (перетаскивание, «−», прокрутка, тап по пустому месту), поэтому от внутренностей Control Center
+// ничего не зависит и он не закрывается от случайного нажатия.
 @interface CXHostView : UIView <UIGestureRecognizerDelegate>
 @end
 @implementation CXHostView
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *v = [super hitTest:point withEvent:event];
-    if (v != self) return v;
-    if (!gEditing) return nil;
-    if (CXPointInsideModule(self, point)) return nil;   // отдаём касание слою редактирования модуля
-    return self;
+    if (v != self) return v;                // кнопки, шторка
+    return gEditing ? self : nil;           // всё остальное съедаем только в режиме редактирования
 }
-// Жесты этого слоя реагируют только на касания «в пустоту»
+// Жесты слоя реагируют только на касания «мимо» его кнопок и шторки
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
     return touch.view == self;
 }
@@ -76,8 +62,7 @@ static BOOL CXPointInsideModule(UIView *host, CGPoint p) {
 
 static CXHostView *gHost = nil;
 
-// Пока идёт редактирование, отключаем жесты Control Center (закрытие свайпом или тапом),
-// но оставляем прокрутку, чтобы страницу можно было листать вверх и вниз.
+// Пока идёт редактирование, отключаем жесты Control Center (закрытие свайпом или тапом)
 static void CXAddChain(UIView *from, NSMutableOrderedSet<UIView *> *views) {
     for (UIView *x = from; x; x = x.superview) [views addObject:x];
 }
@@ -110,6 +95,8 @@ static void CXSuspendCCGestures(UIView *rootView, BOOL suspend) {
 - (void)cx_doneTapped;
 - (void)cx_cancelTapped;
 - (void)cx_emptyTapped;
+- (void)cx_hostTap:(UITapGestureRecognizer *)g;
+- (void)cx_hostLong:(UILongPressGestureRecognizer *)g;
 - (void)cx_hostPan:(UIPanGestureRecognizer *)g;
 - (void)cx_pagerTick:(CADisplayLink *)link;
 - (void)cx_scrollPan:(UIPanGestureRecognizer *)g;
@@ -121,9 +108,6 @@ static void CXSuspendCCGestures(UIView *rootView, BOOL suspend) {
 - (NSString *)moduleIdentifier;
 - (void)cx_refreshEdit;
 - (void)cx_planChanged;
-- (void)cx_badgeTapped;
-- (void)cx_pan:(UILongPressGestureRecognizer *)g;
-- (void)cx_dragTick:(CADisplayLink *)link;
 - (void)cx_setSystemGestures:(BOOL)enable;
 @end
 
@@ -147,6 +131,28 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 
 static void CXHaptic(void) {
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+}
+
+// Короткая подсказка внизу экрана
+static void CXToast(NSString *text) {
+    if (!gHost) return;
+    UILabel *l = [UILabel new];
+    l.text = text;
+    l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    l.textColor = UIColor.whiteColor;
+    l.textAlignment = NSTextAlignmentCenter;
+    l.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.7];
+    l.layer.cornerRadius = 15;
+    l.clipsToBounds = YES;
+    CGSize sz = [l sizeThatFits:CGSizeMake(gHost.bounds.size.width - 60, 40)];
+    l.frame = CGRectMake(0, 0, sz.width + 28, 30);
+    l.center = CGPointMake(gHost.bounds.size.width / 2, gHost.bounds.size.height - 70);
+    l.alpha = 0;
+    [gHost addSubview:l];
+    [UIView animateWithDuration:0.2 animations:^{ l.alpha = 1; } completion:^(BOOL f) {
+        [UIView animateWithDuration:0.3 delay:1.4 options:0 animations:^{ l.alpha = 0; }
+                         completion:^(BOOL f2) { [l removeFromSuperview]; }];
+    }];
 }
 
 // Модуль сейчас показан на экране
@@ -202,8 +208,44 @@ static NSArray<NSString *> *CXVisualOrder(UIView *sup) {
     return ids;
 }
 
+// Модуль под пальцем (координаты точки: в слое редактирования)
+static CCUIContentModuleContainerViewController *CXModuleAtPoint(UIView *host, CGPoint p) {
+    for (UIViewController *o in gContainers.allObjects) {
+        if (!o.isViewLoaded || !o.view.window) continue;
+        CGRect r = [host convertRect:o.view.bounds fromView:o.view];
+        if (CGRectContainsPoint(r, p)) return (CCUIContentModuleContainerViewController *)o;
+    }
+    return nil;
+}
+
+// ---------- Страницы ----------
+
+// Подгоняем отступы прокрутки так, чтобы до каждой страницы можно было доскроллить
+static void CXApplyInsets(UIScrollView *sv, NSArray<NSNumber *> *offs) {
+    NSValue *stored = objc_getAssociatedObject(sv, &kOrigInsetKey);
+    if (!stored) {
+        stored = [NSValue valueWithUIEdgeInsets:sv.contentInset];
+        objc_setAssociatedObject(sv, &kOrigInsetKey, stored, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    UIEdgeInsets orig = stored.UIEdgeInsetsValue;
+    CGFloat safeTop = sv.adjustedContentInset.top - sv.contentInset.top;
+    CGFloat safeBottom = sv.adjustedContentInset.bottom - sv.contentInset.bottom;
+    CGFloat natMin = -(orig.top + safeTop);
+    CGFloat natMax = sv.contentSize.height - sv.bounds.size.height + orig.bottom + safeBottom;
+    CGFloat minOff = offs.firstObject.doubleValue;
+    CGFloat maxOff = offs.lastObject.doubleValue;
+
+    UIEdgeInsets want = orig;
+    if (minOff < natMin) want.top = orig.top + (natMin - minOff);
+    if (maxOff > natMax) want.bottom = orig.bottom + (maxOff - natMax);
+    if (fabs(want.top - sv.contentInset.top) > 1 || fabs(want.bottom - sv.contentInset.bottom) > 1) {
+        sv.contentInset = want;
+    }
+}
+
 // Смещения прокрутки, на которых «останавливается» каждая страница.
-// Страницы набираются из целых рядов модулей, чтобы ничего не обрезалось по краям.
+// На странице помещается не весь экран: сверху остаётся место под статус-бар и кнопки,
+// снизу небольшой отступ. Страницы набираются из целых рядов модулей.
 static NSArray<NSNumber *> *CXPageOffsets(UIScrollView *sv) {
     NSMutableArray<NSValue *> *frames = [NSMutableArray new];
     for (UIViewController *o in gContainers.allObjects) {
@@ -211,28 +253,27 @@ static NSArray<NSNumber *> *CXPageOffsets(UIScrollView *sv) {
         CGRect f = [o.view.superview convertRect:CXBaseFrame(o.view) toView:sv];
         [frames addObject:[NSValue valueWithCGRect:f]];
     }
-    CGFloat minOff = -sv.adjustedContentInset.top;
-    if (frames.count < 2) return @[@(minOff)];
+    if (frames.count == 0) return @[@(-sv.adjustedContentInset.top)];
     [frames sortUsingComparator:^NSComparisonResult(NSValue *a, NSValue *b) {
         return [@(a.CGRectValue.origin.y) compare:@(b.CGRectValue.origin.y)];
     }];
 
-    CGFloat maxOff = MAX(minOff, sv.contentSize.height - sv.bounds.size.height + sv.adjustedContentInset.bottom);
-    CGFloat viewH = sv.bounds.size.height - sv.adjustedContentInset.top - sv.adjustedContentInset.bottom;
-    CGFloat firstY = frames.firstObject.CGRectValue.origin.y;
-    CGFloat pad = MAX(firstY - minOff, 0);
-    CGFloat available = viewH - pad - 16;
+    CGFloat H = sv.bounds.size.height;
+    CGFloat topMargin = MAX(sv.window.safeAreaInsets.top, 20) + 50;
+    CGFloat bottomMargin = 44;
+    CGFloat capacity = H - topMargin - bottomMargin;
 
-    NSMutableArray<NSNumber *> *offs = [NSMutableArray arrayWithObject:@(minOff)];
+    CGFloat firstY = frames.firstObject.CGRectValue.origin.y;
+    NSMutableArray<NSNumber *> *offs = [NSMutableArray arrayWithObject:@(firstY - topMargin)];
     CGFloat start = firstY;
     for (NSValue *v in frames) {
         CGRect f = v.CGRectValue;
-        if (CGRectGetMaxY(f) - start > available && f.origin.y > start + 1) {
+        if (CGRectGetMaxY(f) - start > capacity && f.origin.y > start + 1) {
             start = f.origin.y;
-            CGFloat off = MAX(minOff, MIN(maxOff, start - pad));
-            if (fabs(off - offs.lastObject.doubleValue) > 2) [offs addObject:@(off)];
+            [offs addObject:@(start - topMargin)];
         }
     }
+    CXApplyInsets(sv, offs);
     return offs;
 }
 
@@ -260,31 +301,6 @@ static void CXSnapScroll(UIScrollView *sv, CGFloat vy) {
                         options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
                      animations:^{ sv.contentOffset = CGPointMake(sv.contentOffset.x, target); }
                      completion:nil];
-}
-
-// Если ряды модулей упираются в верхний край, добавляем отступ сверху, чтобы они не залезали под статус-бар
-static void CXEnsureTopPadding(UIScrollView *sv) {
-    if (objc_getAssociatedObject(sv, &kTopFixKey)) return;
-    NSArray<NSNumber *> *offs = CXPageOffsets(sv);
-    if (offs.count < 2) return;
-    objc_setAssociatedObject(sv, &kTopFixKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    CGFloat minOff = -sv.adjustedContentInset.top;
-    CGFloat firstY = CGFLOAT_MAX;
-    for (UIViewController *o in gContainers.allObjects) {
-        if (!o.isViewLoaded || !o.view.window || !o.view.superview) continue;
-        CGRect f = [o.view.superview convertRect:CXBaseFrame(o.view) toView:sv];
-        firstY = MIN(firstY, f.origin.y);
-    }
-    CGFloat minPad = MAX(sv.window.safeAreaInsets.top, 20) + 14;
-    CGFloat deficit = minPad - (firstY - minOff);
-    if (deficit > 1) {
-        BOOL atTop = sv.contentOffset.y <= minOff + 1;
-        UIEdgeInsets i = sv.contentInset;
-        i.top += deficit;
-        sv.contentInset = i;
-        if (atTop) sv.contentOffset = CGPointMake(sv.contentOffset.x, -sv.adjustedContentInset.top);
-    }
 }
 
 // Вертикальные точки справа: на какой странице мы сейчас
@@ -325,6 +341,8 @@ static void CXUpdateDots(NSInteger count, NSInteger current) {
         gDotsCurrent = current;
     }
 }
+
+// ---------- Перетаскивание ----------
 
 // Один «кадр» перетаскивания: палец ведёт модуль, а модуль под ним уступает место
 static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
@@ -372,6 +390,83 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
     }
 }
 
+// Кадр таймера: автопрокрутка у краёв экрана + движение модуля
+static void CXDragFrame(void) {
+    CCUIContentModuleContainerViewController *vc = (CCUIContentModuleContainerViewController *)gDragging;
+    if (!vc || !gDragGR) {
+        [gDragLink invalidate];
+        gDragLink = nil;
+        return;
+    }
+    UIScrollView *sv = gDragScroll;
+    UILongPressGestureRecognizer *g = gDragGR;
+    if (sv && g) {
+        CGFloat H = sv.window.bounds.size.height;
+        CGFloat y = [g locationInView:nil].y;
+        CGFloat speed = 0;
+        if (y > H - 110) speed = (y - (H - 110)) / 110.0 * 14.0;
+        else if (y < 120) speed = -((120.0 - y) / 120.0) * 14.0;
+        if (fabs(speed) > 0.5) {
+            CGFloat minY = -sv.adjustedContentInset.top;
+            CGFloat maxY = MAX(minY, sv.contentSize.height - sv.bounds.size.height + sv.adjustedContentInset.bottom);
+            CGFloat ny = MAX(minY, MIN(maxY, sv.contentOffset.y + speed));
+            sv.contentOffset = CGPointMake(sv.contentOffset.x, ny);
+        }
+    }
+    CXUpdateDrag(vc);
+}
+
+@interface CXTicker : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+@implementation CXTicker
+- (void)tick:(CADisplayLink *)link { CXDragFrame(); }
+@end
+static CXTicker *gTicker = nil;
+
+static void CXDragBegin(UILongPressGestureRecognizer *g, CCUIContentModuleContainerViewController *vc) {
+    UIView *v = vc.view;
+    UIView *sup = v.superview;
+    if (!sup) return;
+    gDragging = vc;
+    gDragGR = g;
+    gDragBase = v.transform;
+    gDragStartCenter = CGPointMake(CGRectGetMidX(v.frame), CGRectGetMidY(v.frame));
+    gDragHome = gDragStartCenter;
+    gDragLoc0 = [g locationInView:sup];
+    gDragScroll = CXFindScrollView();
+    [v.layer removeAnimationForKey:@"cx_wobble"];
+    [sup bringSubviewToFront:v];
+    CXHaptic();
+
+    if (!gTicker) gTicker = [CXTicker new];
+    gDragLink = [CADisplayLink displayLinkWithTarget:gTicker selector:@selector(tick:)];
+    [gDragLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    [UIView animateWithDuration:0.2 animations:^{ CXUpdateDrag(vc); }];   // модуль «приподнимается»
+}
+
+static void CXDragEnd(void) {
+    CCUIContentModuleContainerViewController *vc = (CCUIContentModuleContainerViewController *)gDragging;
+    if (!vc) return;
+    UIView *v = vc.view;
+    gDragging = nil;
+    [gDragLink invalidate];
+    gDragLink = nil;
+    UIScrollView *sv = gDragScroll;
+    gDragScroll = nil;
+    gDragGR = nil;
+
+    // Модуль плавно «садится» на своё (возможно, новое) место
+    CGAffineTransform end = CGAffineTransformTranslate(gDragBase, gDragHome.x - gDragStartCenter.x,
+                                                       gDragHome.y - gDragStartCenter.y);
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ v.transform = end; } completion:nil];
+    CXHaptic();
+    [vc cx_refreshEdit];                      // вернуть покачивание
+    if (sv) CXSnapScroll(sv, 0);              // страница мягко встаёт на ближайшую «остановку»
+}
+
 // ---------- Оверлей Control Center: долгий тап, «+», «Готово / Применить», «Отмена» ----------
 
 %hook CCUIModularControlCenterOverlayViewController
@@ -402,6 +497,7 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
     }
     gDotsCount = 0;
     gDotsCurrent = -1;
+    gInitialSnapDone = NO;
     if (!gPagerLink) {
         gPagerLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(cx_pagerTick:)];
         gPagerLink.preferredFramesPerSecond = 20;
@@ -434,9 +530,14 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
         sv.decelerationRate = UIScrollViewDecelerationRateFast;
         [sv.panGestureRecognizer addTarget:self action:@selector(cx_scrollPan:)];
     }
-    CXEnsureTopPadding(sv);
 
     NSArray<NSNumber *> *offs = CXPageOffsets(sv);
+
+    // При открытии Control Center сразу ставим первую страницу так, чтобы верхний ряд не залезал под статус-бар
+    if (!gInitialSnapDone && !sv.isTracking && !sv.isDecelerating) {
+        gInitialSnapDone = YES;
+        sv.contentOffset = CGPointMake(sv.contentOffset.x, offs.firstObject.doubleValue);
+    }
     CXUpdateDots(offs.count, CXNearestIndex(offs, sv.contentOffset.y));
 }
 
@@ -444,7 +545,7 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
 - (void)cx_scrollPan:(UIPanGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateEnded && g.state != UIGestureRecognizerStateCancelled) return;
     UIScrollView *sv = (UIScrollView *)g.view;
-    if (![sv isKindOfClass:UIScrollView.class] || gDragging) return;
+    if (![sv isKindOfClass:UIScrollView.class] || gDragging || gEditing) return;
     CGFloat vy = [g velocityInView:sv].y;
     dispatch_async(dispatch_get_main_queue(), ^{ CXSnapScroll(sv, vy); });
 }
@@ -492,10 +593,17 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
             [cancel.leadingAnchor constraintEqualToAnchor:done.trailingAnchor constant:8],
         ]];
 
-        // Тап по пустому месту: плавный выход из редактирования. Свайп по пустому месту: прокрутка.
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(cx_emptyTapped)];
+        // Тап: «−» или пустое место. Зажать и тащить: двигать модуль. Свайп: листать страницы.
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(cx_hostTap:)];
         tap.delegate = host;
         [host addGestureRecognizer:tap];
+
+        UILongPressGestureRecognizer *drag = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(cx_hostLong:)];
+        drag.minimumPressDuration = 0.22;
+        drag.allowableMovement = 10;
+        drag.delegate = host;
+        [host addGestureRecognizer:drag];
+
         UIPanGestureRecognizer *hp = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(cx_hostPan:)];
         hp.delegate = host;
         [host addGestureRecognizer:hp];
@@ -509,6 +617,7 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
                          animations:^{ host.alpha = 1; } completion:nil];
     } else {
         if (gSheet) [gSheet closeSheet];
+        CXDragEnd();
         CXHostView *old = gHost;
         gHost = nil;
         [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseInOut
@@ -516,6 +625,48 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
                          completion:^(BOOL f) { [old removeFromSuperview]; }];
     }
     [[NSNotificationCenter defaultCenter] postNotificationName:kEditNote object:nil];
+}
+
+%new
+- (void)cx_hostTap:(UITapGestureRecognizer *)g {
+    if (gSheet || !gHost) return;
+    CGPoint p = [g locationInView:gHost];
+    CCUIContentModuleContainerViewController *vc = CXModuleAtPoint(gHost, p);
+    if (vc) {
+        // Тап по модулю: работает только значок «−» в его левом верхнем углу
+        NSString *ident = [vc moduleIdentifier];
+        CGRect r = [gHost convertRect:vc.view.bounds fromView:vc.view];
+        CGRect badge = CGRectMake(r.origin.x - 4, r.origin.y - 4, 46, 46);
+        if (ident && CXIsRemovable(ident) && CGRectContainsPoint(badge, p)) {
+            CXHaptic();
+            CXPlanToggleRemove(ident);
+        }
+        return;
+    }
+    [self cx_emptyTapped];
+}
+
+%new
+- (void)cx_hostLong:(UILongPressGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateBegan) {
+        if (gSheet) return;
+        CGPoint p = [g locationInView:gHost];
+        CCUIContentModuleContainerViewController *vc = CXModuleAtPoint(gHost, p);
+        if (!vc) return;
+        NSString *ident = [vc moduleIdentifier];
+        if (!ident || CXPlanIsRemoved(ident)) return;
+        if (!CXIsRemovable(ident)) {
+            CXHaptic();
+            CXToast(@"Этот элемент закреплён, его нельзя двигать");
+            return;
+        }
+        CXDragBegin(g, vc);
+    } else if (g.state == UIGestureRecognizerStateChanged) {
+        if (gDragging) CXDragFrame();
+    } else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled ||
+               g.state == UIGestureRecognizerStateFailed) {
+        CXDragEnd();
+    }
 }
 
 %new
@@ -548,6 +699,8 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
         CGFloat maxY = MAX(minY, sv.contentSize.height - sv.bounds.size.height + sv.adjustedContentInset.bottom);
         CGFloat y = startY - [g translationInView:g.view].y;
         sv.contentOffset = CGPointMake(sv.contentOffset.x, MAX(minY, MIN(maxY, y)));
+    } else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
+        CXSnapScroll(sv, [g velocityInView:g.view].y);
     }
 }
 
@@ -628,7 +781,7 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
 
 %end
 
-// ---------- Контейнер каждого модуля: слой редактирования, «−», покачивание, перетаскивание ----------
+// ---------- Контейнер каждого модуля: значок «−», покачивание ----------
 
 %hook CCUIContentModuleContainerViewController
 
@@ -673,7 +826,7 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
     BOOL removable = CXIsRemovable(ident);
     BOOL removed = CXPlanIsRemoved(ident);
 
-    // --- слой редактирования ---
+    // --- слой со значком (касаний не принимает) ---
     if (!ov) {
         [self cx_setSystemGestures:NO];
 
@@ -681,21 +834,16 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
         ov.tag = kTagOverlay;
         ov.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         ov.backgroundColor = UIColor.clearColor;
+        ov.userInteractionEnabled = NO;
         ov.alpha = 0;
-
-        // Зажать и перетащить; быстрый свайп по модулю листает страницу
-        UILongPressGestureRecognizer *drag = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(cx_pan:)];
-        drag.minimumPressDuration = 0.2;
-        drag.allowableMovement = 14;
-        [ov addGestureRecognizer:drag];
 
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
         b.tag = kTagBadge;
-        b.frame = CGRectMake(0, 0, 40, 40);    // большая зона нажатия, чтобы легко попадать по «−»
+        b.userInteractionEnabled = NO;
+        b.frame = CGRectMake(0, 0, 40, 40);
         b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
         b.contentVerticalAlignment = UIControlContentVerticalAlignmentTop;
         b.contentEdgeInsets = UIEdgeInsetsMake(4, 4, 0, 0);
-        [b addTarget:self action:@selector(cx_badgeTapped) forControlEvents:UIControlEventTouchUpInside];
         [ov addSubview:b];
 
         [v addSubview:ov];
@@ -758,14 +906,6 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
 }
 
 %new
-- (void)cx_badgeTapped {
-    NSString *ident = [self moduleIdentifier];
-    if (!ident || !CXIsRemovable(ident)) return;
-    CXHaptic();
-    CXPlanToggleRemove(ident);
-}
-
-%new
 - (void)cx_setSystemGestures:(BOOL)enable {
     // На время редактирования отключаем системные жесты модуля (раскрытие по долгому нажатию и т.п.)
     UIView *v = self.view;
@@ -785,90 +925,6 @@ static void CXUpdateDrag(CCUIContentModuleContainerViewController *vc) {
         for (UIGestureRecognizer *gr in disabled) gr.enabled = YES;
         objc_setAssociatedObject(self, &kGestureStoreKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-}
-
-%new
-- (void)cx_pan:(UILongPressGestureRecognizer *)g {
-    UIView *v = self.view;
-    UIView *sup = v.superview;
-    NSString *ident = [self moduleIdentifier];
-    if (!sup || !ident) return;
-
-    if (g.state == UIGestureRecognizerStateBegan) {
-        if (!CXIsRemovable(ident) || CXPlanIsRemoved(ident)) {
-            g.enabled = NO;     // сбрасываем жест: этот модуль двигать нельзя (он фиксированный)
-            g.enabled = YES;
-            return;
-        }
-        gDragging = self;
-        gDragGR = g;
-        gDragBase = v.transform;
-        gDragStartCenter = CGPointMake(CGRectGetMidX(v.frame), CGRectGetMidY(v.frame));
-        gDragHome = gDragStartCenter;
-        gDragLoc0 = [g locationInView:sup];
-        gDragScroll = CXFindScrollView();
-        gDragScroll.scrollEnabled = NO;          // пока тащим модуль, страница не должна ехать сама по себе
-        [v.layer removeAnimationForKey:@"cx_wobble"];
-        [sup bringSubviewToFront:v];
-        CXHaptic();
-
-        gDragLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(cx_dragTick:)];
-        [gDragLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCUIContentModuleContainerViewController *me = (CCUIContentModuleContainerViewController *)self;
-        [UIView animateWithDuration:0.2 animations:^{ CXUpdateDrag(me); }];   // модуль «приподнимается»
-        return;
-    }
-
-    if (gDragging != self) return;
-
-    if (g.state == UIGestureRecognizerStateChanged) {
-        CXUpdateDrag((CCUIContentModuleContainerViewController *)self);
-        return;
-    }
-
-    if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled ||
-        g.state == UIGestureRecognizerStateFailed) {
-        gDragging = nil;
-        [gDragLink invalidate];
-        gDragLink = nil;
-        UIScrollView *dragSV = gDragScroll;
-        dragSV.scrollEnabled = YES;
-        gDragScroll = nil;
-        gDragGR = nil;
-        if (dragSV) CXSnapScroll(dragSV, 0);
-
-        // Модуль плавно «садится» на своё (возможно, новое) место
-        CGAffineTransform end = CGAffineTransformTranslate(gDragBase, gDragHome.x - gDragStartCenter.x,
-                                                           gDragHome.y - gDragStartCenter.y);
-        [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.3
-                            options:UIViewAnimationOptionAllowUserInteraction
-                         animations:^{ v.transform = end; } completion:nil];
-        CXHaptic();
-        [self cx_refreshEdit];    // вернуть покачивание
-    }
-}
-
-%new
-- (void)cx_dragTick:(CADisplayLink *)link {
-    if (gDragging != self) { [link invalidate]; return; }
-
-    // Автопрокрутка страницы, когда модуль подтащили к верхнему или нижнему краю
-    UIScrollView *sv = gDragScroll;
-    UILongPressGestureRecognizer *g = gDragGR;
-    if (sv && g) {
-        CGFloat H = sv.window.bounds.size.height;
-        CGFloat y = [g locationInView:nil].y;
-        CGFloat speed = 0;
-        if (y > H - 110) speed = (y - (H - 110)) / 110.0 * 14.0;
-        else if (y < 120) speed = -((120.0 - y) / 120.0) * 14.0;
-        if (fabs(speed) > 0.5) {
-            CGFloat minY = -sv.adjustedContentInset.top;
-            CGFloat maxY = MAX(minY, sv.contentSize.height - sv.bounds.size.height + sv.adjustedContentInset.bottom);
-            CGFloat ny = MAX(minY, MIN(maxY, sv.contentOffset.y + speed));
-            sv.contentOffset = CGPointMake(sv.contentOffset.x, ny);
-        }
-    }
-    CXUpdateDrag((CCUIContentModuleContainerViewController *)self);
 }
 
 %end
