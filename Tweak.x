@@ -66,41 +66,29 @@ static CXPassView *gDotsHost = nil;
 
 static CXHostView *gHost = nil;
 
-// «Щит»: прозрачное окно НАД Control Center. В режиме редактирования оно перехватывает все касания,
-// кроме кнопок «Готово / Отмена / +» и шторки, поэтому Control Center вообще не видит нажатий
-// (не раскрывает яркость и громкость, не закрывается, не листается сам).
-@interface CXShieldView : UIView
-@end
-@implementation CXShieldView
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (!gEditing || !gHost || gSheet) return nil;
-    for (NSNumber *t in @[@(kTagPlus), @(kTagDone), @(kTagCancel)]) {
-        UIView *b = [gHost viewWithTag:t.integerValue];
-        if (!b || b.hidden || b.alpha < 0.05) continue;
-        CGRect r = [self convertRect:b.bounds fromView:b];
-        if (CGRectContainsPoint(CGRectInset(r, -8, -8), point)) return nil;   // пропускаем к кнопкам
-    }
-    return self;
-}
-@end
-
+// Окно-«щит» накрывает ТОЛЬКО область модулей (ниже строки с кнопками «Готово / Отмена / +»).
+// Оно забирает касания у Control Center, поэтому он не раскрывает яркость и громкость, не закрывается
+// и не листается сам. Кнопки и шторка остаются в окне Control Center, и окно-щит их не перекрывает:
+// сверху оно начинается ниже кнопок, а пока открыта шторка, оно временно прячется.
 static UIWindow *gShield = nil;
+static __weak UIWindow *gCCWindow = nil;
+static const CGFloat kShieldTop = 76;
 
-static void CXHideShield(void) {
-    gShield.hidden = YES;
-    gShield = nil;
+static void CXShieldSetActive(BOOL active) {
+    gShield.hidden = !active;
 }
 
-static void CXShowShield(id target) {
-    CXHideShield();
-    UIWindow *cc = gHost.window;
-    UIWindow *w = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+static void CXShowShieldWindow(UIWindow *cc, id target) {
+    gShield.hidden = YES;
+    gCCWindow = cc;
+    CGRect b = UIScreen.mainScreen.bounds;
+    UIWindow *w = [[UIWindow alloc] initWithFrame:CGRectMake(0, kShieldTop, b.size.width, b.size.height - kShieldTop)];
     if (cc.windowScene) w.windowScene = cc.windowScene;
     w.windowLevel = cc.windowLevel + 1;
     w.backgroundColor = UIColor.clearColor;
 
     UIViewController *rvc = [UIViewController new];
-    CXShieldView *view = [[CXShieldView alloc] initWithFrame:w.bounds];
+    UIView *view = [[UIView alloc] initWithFrame:w.bounds];
     view.backgroundColor = UIColor.clearColor;
     rvc.view = view;
     w.rootViewController = rvc;
@@ -254,8 +242,10 @@ static BOOL CXIsShown(NSString *ident) {
 
 // Запасной вариант: плавно гасим экран и перезапускаем SpringBoard
 static void CXSmoothRespring(void) {
-    UIView *w = gHost.window;
-    [UIView animateWithDuration:0.3 animations:^{ w.alpha = 0; }];
+    UIWindow *w1 = gHost.window;
+    UIWindow *w2 = gCCWindow;
+    UIWindow *w3 = gShield;
+    [UIView animateWithDuration:0.3 animations:^{ w1.alpha = 0; w2.alpha = 0; w3.alpha = 0; }];
     CXRespringNow();
 }
 
@@ -957,6 +947,7 @@ static void CXDragEnd(void) {
     if (on) {
         // Кнопки живут в верхнем слое окна, поэтому ничто в Control Center их не перекроет
         UIView *parent = self.view.window ?: self.view;
+        UIWindow *ccWindow = self.view.window;
         CXHostView *host = [[CXHostView alloc] initWithFrame:parent.bounds];
         host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         host.backgroundColor = UIColor.clearColor;
@@ -1000,16 +991,17 @@ static void CXDragEnd(void) {
         host.alpha = 0;
         [parent addSubview:host];
         gHost = host;
+        CXShowShieldWindow(ccWindow, self);
         CXSuspendCCGestures(self.view, YES);
-        CXShowShield(self);
         [self cx_refreshButtons];
         [UIView animateWithDuration:0.28 delay:0 options:UIViewAnimationOptionCurveEaseOut
                          animations:^{ host.alpha = 1; } completion:nil];
     } else {
         if (gSheet) [gSheet closeSheet];
-        CXHideShield();
         CXDragEnd();
         CXHostView *old = gHost;
+        gShield.hidden = YES;
+        gShield = nil;
         gHost = nil;
         [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseInOut
                          animations:^{ old.alpha = 0; }
@@ -1157,8 +1149,12 @@ static void CXDragEnd(void) {
     if (!gHost || gSheet) return;
     CXHaptic();
     CXPickerController *vc = [CXPickerController new];
-    vc.onClose = ^{ gSheet = nil; };
+    vc.onClose = ^{
+        gSheet = nil;
+        CXShieldSetActive(YES);        // шторку закрыли: щит снова работает
+    };
     gSheet = vc;
+    CXShieldSetActive(NO);             // пока открыта шторка, щит не должен перекрывать её
     [vc showInView:gHost parent:self];
 }
 
