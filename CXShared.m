@@ -312,9 +312,15 @@ static void CXApplyAdd(NSString *ident) {
 static void CXApplyOrder(NSArray<NSString *> *order) {
     id prov = CXNewProvider();
     NSArray *ue = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
+    NSArray *fx = CXProvList(prov, @"orderedFixedModuleIdentifiers");
+    NSArray *uf = CXProvList(prov, @"orderedUserEnabledFixedModuleIdentifiers");
     NSMutableArray *n = [NSMutableArray new];
-    // сначала всё, что видно на экране, в новом порядке; потом остальное из старого списка
-    for (NSString *i in order) if (![n containsObject:i] && ![gPlanRemove containsObject:i]) [n addObject:i];
+    // Всё, что видно на экране, в новом порядке (и модули любого размера). Системно закреплённые модули
+    // в пользовательский список не добавляем, иначе они могли бы продублироваться.
+    for (NSString *i in order) {
+        if ([fx containsObject:i] && ![uf containsObject:i]) continue;
+        if (![n containsObject:i] && ![gPlanRemove containsObject:i]) [n addObject:i];
+    }
     for (NSString *i in ue) if (![n containsObject:i] && ![gPlanRemove containsObject:i]) [n addObject:i];
     CXProvSet(prov, @"setAndSaveOrderedUserEnabledModuleIdentifiers:", n);
 }
