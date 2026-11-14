@@ -8,7 +8,7 @@ static BOOL gEditing = NO;
 static NSString *const kEditNote = @"com.ccplus.editChanged";
 enum { kTagPlus = 7001, kTagDone = 7002, kTagCancel = 7003, kTagOverlay = 7010, kTagBadge = 7011 };
 
-static char kGestureStoreKey, kSnapKey, kOrigInsetKey, kFadeKey;
+static char kGestureStoreKey, kOrigInsetKey;
 
 static CXPickerController *gSheet = nil;
 static NSHashTable<UIViewController *> *gContainers = nil;
@@ -17,7 +17,7 @@ static NSMutableArray<UIGestureRecognizer *> *gSuspended = nil;
 
 // Состояние перетаскивания (одновременно двигается только один модуль)
 static CGAffineTransform gDragBase;
-static CGPoint gDragHome, gDragLoc0;
+static CGPoint gDragLoc0;
 static __weak UILongPressGestureRecognizer *gDragGR = nil;
 static CADisplayLink *gDragLink = nil;
 static __weak UIScrollView *gDragScroll = nil;
@@ -230,16 +230,6 @@ static void CXToastFor(NSString *text, double hold) {
 
 static void CXToast(NSString *text) { CXToastFor(text, 1.4); }
 
-// Модуль сейчас показан на экране
-static BOOL CXIsShown(NSString *ident) {
-    for (UIViewController *o in gContainers.allObjects) {
-        if (!o.isViewLoaded || !o.view.window) continue;
-        CCUIContentModuleContainerViewController *c = (CCUIContentModuleContainerViewController *)o;
-        if ([[c moduleIdentifier] isEqualToString:ident]) return YES;
-    }
-    return NO;
-}
-
 // «Перезаход» в Control Center: закрываем и открываем заново, чтобы он перечитал настройки и
 // заново разложил модули. Возвращает NO, если системный контроллер недоступен.
 static BOOL CXReopenControlCenter(void) {
@@ -274,15 +264,6 @@ static BOOL CXReopenControlCenter(void) {
     return YES;
 }
 
-// Запасной вариант: плавно гасим экран и перезапускаем SpringBoard
-static void CXSmoothRespring(void) {
-    UIWindow *w1 = gHost.window;
-    UIWindow *w2 = gCCWindow;
-    UIWindow *w3 = gShield;
-    [UIView animateWithDuration:0.3 animations:^{ w1.alpha = 0; w2.alpha = 0; w3.alpha = 0; }];
-    CXRespringNow();
-}
-
 static UIScrollView *CXFindScrollView(void) {
     for (UIViewController *o in gContainers.allObjects) {
         if (!o.isViewLoaded) continue;
@@ -313,21 +294,6 @@ static UIView *CXSpace(void) {
 
 static CGRect CXFrameInSpace(UIView *v, UIView *space) {
     return [v.superview convertRect:CXBaseFrame(v) toView:space];
-}
-
-// Где сейчас лежит каждый модуль (собственная раскладка Control Center, без наших сдвигов)
-static NSDictionary<NSString *, NSValue *> *CXSnapshotBase(void) {
-    UIView *space = CXSpace();
-    NSMutableDictionary<NSString *, NSValue *> *d = [NSMutableDictionary new];
-    if (!space) return d;
-    for (UIViewController *o in gContainers.allObjects) {
-        if (!o.isViewLoaded || !o.view.window || !o.view.superview) continue;
-        NSString *oid = [(CCUIContentModuleContainerViewController *)o moduleIdentifier];
-        if (!oid) continue;
-        CGRect f = CXFrameInSpace(o.view, space);
-        d[oid] = [NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f))];
-    }
-    return d;
 }
 
 // Модуль под пальцем (координаты точки: в слое редактирования)

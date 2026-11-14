@@ -63,12 +63,6 @@ static NSSet *CXLiveSet(id im) {
     return nil;
 }
 
-static void CXSetLive(id im, NSSet *set) {
-    SEL s = NSSelectorFromString(@"setEnabledModuleIdentifiers:");
-    if (!im || ![im respondsToSelector:s]) return;
-    @try { ((void (*)(id, SEL, id))objc_msgSend)(im, s, set); } @catch (NSException *e) {}
-}
-
 void CXDebugLog(NSString *msg) {
     NSLog(@"[CCPlus] %@", msg);
 }
