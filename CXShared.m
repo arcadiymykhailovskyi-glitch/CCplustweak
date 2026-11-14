@@ -275,13 +275,6 @@ static void CXApplyRemove(NSString *ident) {
         [n removeObject:ident];
         CXProvSet(prov, @"setAndSaveOrderedUserEnabledFixedModuleIdentifiers:", n);
     }
-    id im = CXManager();
-    NSSet *live = CXLiveSet(im);
-    if (live && [live containsObject:ident]) {
-        NSMutableSet *n = [live mutableCopy];
-        [n removeObject:ident];
-        CXSetLive(im, n);
-    }
 }
 
 static void CXApplyAdd(NSString *ident) {
@@ -299,13 +292,6 @@ static void CXApplyAdd(NSString *ident) {
         NSMutableArray *n = [ue mutableCopy];
         [n addObject:ident];
         CXProvSet(prov, @"setAndSaveOrderedUserEnabledModuleIdentifiers:", n);
-    }
-    id im = CXManager();
-    NSSet *live = CXLiveSet(im);
-    if (live && ![live containsObject:ident]) {
-        NSMutableSet *n = [live mutableCopy];
-        [n addObject:ident];
-        CXSetLive(im, n);
     }
 }
 
@@ -387,34 +373,11 @@ void CXPlanClear(void) {
 NSArray<NSString *> *CXPlanRemovedList(void) { return [gPlanRemove array] ?: @[]; }
 NSArray<NSString *> *CXPlanAddedList(void) { return [gPlanAdd array] ?: @[]; }
 
-BOOL CXPlanApplyLive(void) {
-    BOOL hadOrder = gPlanOrder.count > 0;
+// Только записываем изменения в настройки Control Center. Модулями «вживую» не управляем:
+// такие правки оставляли виджеты висеть сверху и «мёртвыми». Control Center сам перечитывает
+// настройки при следующем открытии.
+void CXPlanApplyPersist(void) {
     for (NSString *r in [gPlanRemove array]) CXApplyRemove(r);
     for (NSString *a in [gPlanAdd array]) CXApplyAdd(a);
-    if (hadOrder) CXApplyOrder(gPlanOrder);
-
-    // Просим менеджер модулей пересобрать список
-    id im = CXManager();
-    SEL upd = NSSelectorFromString(@"_updateModuleInstances");
-    if (im && [im respondsToSelector:upd]) {
-        @try { ((void (*)(id, SEL))objc_msgSend)(im, upd); } @catch (NSException *e) {}
-    }
-    return hadOrder;
-}
-
-// Пересборка модулей: на мгновение убираем их из менеджера и возвращаем. Control Center заново читает
-// порядок из настроек и раскладывает модули по новому порядку, без перезапуска SpringBoard.
-void CXForceReloadModules(void) {
-    id im = CXManager();
-    NSSet *live = CXLiveSet(im);
-    if (!im || !live) return;
-    NSSet *full = [live copy];
-    CXSetLive(im, [NSSet set]);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        CXSetLive(im, full);
-        SEL upd = NSSelectorFromString(@"_updateModuleInstances");
-        if ([im respondsToSelector:upd]) {
-            @try { ((void (*)(id, SEL))objc_msgSend)(im, upd); } @catch (NSException *e) {}
-        }
-    });
+    if (gPlanOrder.count) CXApplyOrder(gPlanOrder);
 }

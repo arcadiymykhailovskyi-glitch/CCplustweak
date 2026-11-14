@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import "CXShared.h"
 #import "CXPickerController.h"
 
@@ -24,7 +25,6 @@ static __weak UIScrollView *gDragScroll = nil;
 // Страницы и точки-индикатор
 static CADisplayLink *gPagerLink = nil;
 static NSInteger gDotsCount = 0, gDotsCurrent = -1;
-static BOOL gInitialSnapDone = NO;
 static NSArray<NSNumber *> *gPageCache = nil;
 static CFTimeInterval gPageCacheT = 0;
 static CGFloat gPageTop = 70;                 // сколько места сверху оставлено на странице
@@ -238,6 +238,40 @@ static BOOL CXIsShown(NSString *ident) {
         if ([[c moduleIdentifier] isEqualToString:ident]) return YES;
     }
     return NO;
+}
+
+// «Перезаход» в Control Center: закрываем и открываем заново, чтобы он перечитал настройки и
+// заново разложил модули. Возвращает NO, если системный контроллер недоступен.
+static BOOL CXReopenControlCenter(void) {
+    Class c = NSClassFromString(@"SBControlCenterController");
+    SEL sh = NSSelectorFromString(@"sharedInstance");
+    if (!c || ![c respondsToSelector:sh]) return NO;
+    id sc = ((id (*)(id, SEL))objc_msgSend)(c, sh);
+    if (!sc) return NO;
+
+    SEL dis1 = NSSelectorFromString(@"dismissAnimated:");
+    SEL dis2 = NSSelectorFromString(@"dismissAnimated:completion:");
+    SEL pre1 = NSSelectorFromString(@"presentAnimated:");
+    SEL pre2 = NSSelectorFromString(@"presentAnimated:completion:");
+    BOOL canDismiss = [sc respondsToSelector:dis1] || [sc respondsToSelector:dis2];
+    BOOL canPresent = [sc respondsToSelector:pre1] || [sc respondsToSelector:pre2];
+    if (!canDismiss) return NO;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            if ([sc respondsToSelector:dis1]) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, dis1, YES);
+            else ((void (*)(id, SEL, BOOL, id))objc_msgSend)(sc, dis2, YES, nil);
+        } @catch (NSException *e) {}
+    });
+    if (canPresent) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if ([sc respondsToSelector:pre1]) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, pre1, YES);
+                else ((void (*)(id, SEL, BOOL, id))objc_msgSend)(sc, pre2, YES, nil);
+            } @catch (NSException *e) {}
+        });
+    }
+    return YES;
 }
 
 // Запасной вариант: плавно гасим экран и перезапускаем SpringBoard
@@ -455,24 +489,19 @@ static CGFloat CXPageProgress(NSArray<NSNumber *> *offs, CGFloat y) {
     return offs.count - 1;
 }
 
-// Как в образце: при перелистывании модули уходящей страницы тают, а следующей проявляются
-static void CXApplyPageFade(UIScrollView *sv, NSArray<NSNumber *> *offs, CGFloat p) {
-    if (offs.count < 2) return;
-    BOOL settled = fabs(p - round(p)) < 0.02;
-    for (UIViewController *o in gContainers.allObjects) {
-        if (!o.isViewLoaded || !o.view.window || !o.view.superview) continue;
-        BOOL touched = objc_getAssociatedObject(o, &kFadeKey) != nil;
-        if (settled && !touched) continue;
-        UIView *v = o.view;
-        CGRect f = [v.superview convertRect:CXBaseFrame(v) toView:sv];
-        NSInteger k = 0;
-        for (NSInteger i = 0; i < (NSInteger)offs.count; i++) {
-            if (f.origin.y >= offs[i].doubleValue + gPageTop - 2) k = i;
-        }
-        CGFloat a = settled ? 1.0 : MAX(0.0, 1.0 - MIN(1.0, fabs(p - k) * 1.3));
-        if (fabs(v.alpha - a) > 0.02) v.alpha = a;
-        objc_setAssociatedObject(o, &kFadeKey, settled ? nil : @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+// Возвращаем прокрутке исходные отступы после редактирования
+static void CXRestoreInsets(UIScrollView *sv) {
+    NSValue *stored = objc_getAssociatedObject(sv, &kOrigInsetKey);
+    if (!stored) return;
+    UIEdgeInsets orig = stored.UIEdgeInsetsValue;
+    if (!UIEdgeInsetsEqualToEdgeInsets(sv.contentInset, orig)) sv.contentInset = orig;
+    CGFloat minY = -sv.adjustedContentInset.top;
+    CGFloat maxY = MAX(minY, sv.contentSize.height - sv.bounds.size.height + sv.adjustedContentInset.bottom);
+    CGFloat y = MAX(minY, MIN(maxY, sv.contentOffset.y));
+    if (fabs(y - sv.contentOffset.y) > 0.5) {
+        [UIView animateWithDuration:0.3 animations:^{ sv.contentOffset = CGPointMake(sv.contentOffset.x, y); }];
     }
+    objc_setAssociatedObject(sv, &kOrigInsetKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // Вертикальные точки справа: на какой странице мы сейчас
@@ -512,6 +541,19 @@ static void CXUpdateDots(NSInteger count, NSInteger current) {
         }
         gDotsCurrent = current;
     }
+}
+
+// Точки в обычном режиме: считаем по самой прокрутке Control Center и ничего в ней не меняем
+static void CXNaturalDots(UIScrollView *sv) {
+    CGFloat H = sv.bounds.size.height;
+    CGFloat total = sv.contentSize.height + sv.adjustedContentInset.top + sv.adjustedContentInset.bottom;
+    NSInteger n = (total > H + 24) ? (NSInteger)ceil(total / H - 0.05) : 1;
+    n = MAX(1, MIN(n, 6));
+    CGFloat minY = -sv.adjustedContentInset.top;
+    CGFloat maxY = MAX(minY, sv.contentSize.height - H + sv.adjustedContentInset.bottom);
+    CGFloat prog = maxY > minY ? (sv.contentOffset.y - minY) / (maxY - minY) : 0;
+    NSInteger cur = (NSInteger)lround(MAX(0.0, MIN(1.0, prog)) * (n - 1));
+    CXUpdateDots(n, cur);
 }
 
 // ---------- Перетаскивание ----------
@@ -881,11 +923,10 @@ static void CXDragEnd(void) {
     }
     gDotsCount = 0;
     gDotsCurrent = -1;
-    gInitialSnapDone = NO;
     gPageCache = nil;
     if (!gPagerLink) {
         gPagerLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(cx_pagerTick:)];
-        gPagerLink.preferredFramesPerSecond = 60;
+        gPagerLink.preferredFramesPerSecond = 20;
         [gPagerLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
 }
@@ -909,30 +950,21 @@ static void CXDragEnd(void) {
     UIScrollView *sv = CXFindScrollView();
     if (!sv) { CXUpdateDots(0, 0); return; }
 
-    // Один раз на каждую прокрутку: быстрое торможение и «доводчик» до страниц
-    if (!objc_getAssociatedObject(sv, &kSnapKey)) {
-        objc_setAssociatedObject(sv, &kSnapKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        sv.decelerationRate = UIScrollViewDecelerationRateFast;
-        [sv.panGestureRecognizer addTarget:self action:@selector(cx_scrollPan:)];
+    if (!gEditing) {
+        // Обычный режим: родная прокрутка Control Center без нашего вмешательства, только точки справа
+        CXNaturalDots(sv);
+        return;
     }
 
-    // Страницы пересчитываем несколько раз в секунду, а не на каждый кадр
+    // Режим редактирования: наши страницы (для перетаскивания и листания)
     CFTimeInterval now = CACurrentMediaTime();
     if (!gPageCache || now - gPageCacheT > 0.25) {
         gPageCache = CXPageOffsets(sv);
         gPageCacheT = now;
     }
     NSArray<NSNumber *> *offs = gPageCache;
-
-    // При открытии Control Center сразу ставим первую страницу так, чтобы верхний ряд не залезал под статус-бар
-    if (!gInitialSnapDone && !sv.isTracking && !sv.isDecelerating) {
-        gInitialSnapDone = YES;
-        sv.contentOffset = CGPointMake(sv.contentOffset.x, offs.firstObject.doubleValue);
-    }
-
     CGFloat p = CXPageProgress(offs, sv.contentOffset.y);
     CXUpdateDots(offs.count, (NSInteger)lround(p));
-    if (!gEditing) CXApplyPageFade(sv, offs, p);
 }
 
 %new
@@ -1014,6 +1046,9 @@ static void CXDragEnd(void) {
     } else {
         if (gSheet) [gSheet closeSheet];
         CXDragEnd();
+        gPageCache = nil;
+        UIScrollView *editSV = CXFindScrollView();
+        if (editSV) CXRestoreInsets(editSV);
         CXHostView *old = gHost;
         gShield.hidden = YES;
         gShield = nil;
@@ -1129,40 +1164,21 @@ static void CXDragEnd(void) {
         [done layoutIfNeeded];
     }];
 
-    NSArray<NSString *> *removed = CXPlanRemovedList();
-    NSArray<NSString *> *added = CXPlanAddedList();
-    NSDictionary<NSString *, NSValue *> *before = CXSnapshotBase();
+    // Записываем в настройки и «перезаходим» в Control Center: он заново разложит модули в новом порядке.
+    CXPlanApplyPersist();
+    CXPlanClear();
+    BOOL reopened = CXReopenControlCenter();
+    CXHaptic();
 
-    // Записываем всё. Если менялся порядок, просим Control Center пересобрать модули «вживую».
-    BOOL reordered = CXPlanApplyLive();
-    if (reordered) CXForceReloadModules();
-
-    __weak CCUIModularControlCenterOverlayViewController *weakSelf = self;
-    double wait = reordered ? 1.6 : 0.9;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        BOOL ok = YES;
-        for (NSString *r in removed) if (CXIsShown(r)) ok = NO;
-        for (NSString *a in added) if (!CXIsShown(a)) ok = NO;
-        if (ok && reordered) {
-            // Порядок применился, если Control Center сам переставил модули (их места изменились)
-            NSDictionary<NSString *, NSValue *> *after = CXSnapshotBase();
-            BOOL moved = NO;
-            for (NSString *i in after) {
-                NSValue *b = before[i];
-                if (!b) continue;
-                CGPoint pa = after[i].CGPointValue, pb = b.CGPointValue;
-                if (hypot(pa.x - pb.x, pa.y - pb.y) > 3) { moved = YES; break; }
-            }
-            ok = moved;
-        }
-        if (ok) {
-            CXPlanClear();                 // всё применилось без респринга
-            CXHaptic();
+    if (reopened) {
+        [self cx_setEditing:NO];
+    } else {
+        CXToastFor(@"Сохранено. Закройте и снова откройте Пункт управления", 2.2);
+        __weak CCUIModularControlCenterOverlayViewController *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [weakSelf cx_setEditing:NO];
-        } else {
-            CXSmoothRespring();            // живое обновление не сработало: перезапуск, как раньше
-        }
-    });
+        });
+    }
 }
 
 %new

@@ -34,9 +34,6 @@ void CXPlanReset(void);    // отмена всех изменений (отка
 void CXPlanClear(void);    // очистить план после успешного применения
 NSArray<NSString *> *CXPlanRemovedList(void);
 NSArray<NSString *> *CXPlanAddedList(void);
-// Записывает план и пробует применить его «вживую», без респринга.
-// Возвращает YES, если без респринга не обойтись (изменён порядок модулей).
-BOOL CXPlanApplyLive(void);
+// Записывает план в настройки Control Center (без управления модулями «вживую»)
+void CXPlanApplyPersist(void);
 void CXRespringNow(void);
-// Просит Control Center пересобрать модули «вживую» (чтобы новый порядок применился без респринга)
-void CXForceReloadModules(void);
