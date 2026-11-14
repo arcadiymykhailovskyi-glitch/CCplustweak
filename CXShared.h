@@ -38,3 +38,5 @@ NSArray<NSString *> *CXPlanAddedList(void);
 // Возвращает YES, если без респринга не обойтись (изменён порядок модулей).
 BOOL CXPlanApplyLive(void);
 void CXRespringNow(void);
+// Просит Control Center пересобрать модули «вживую» (чтобы новый порядок применился без респринга)
+void CXForceReloadModules(void);

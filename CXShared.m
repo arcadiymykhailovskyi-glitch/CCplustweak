@@ -401,3 +401,20 @@ BOOL CXPlanApplyLive(void) {
     }
     return hadOrder;
 }
+
+// Пересборка модулей: на мгновение убираем их из менеджера и возвращаем. Control Center заново читает
+// порядок из настроек и раскладывает модули по новому порядку, без перезапуска SpringBoard.
+void CXForceReloadModules(void) {
+    id im = CXManager();
+    NSSet *live = CXLiveSet(im);
+    if (!im || !live) return;
+    NSSet *full = [live copy];
+    CXSetLive(im, [NSSet set]);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        CXSetLive(im, full);
+        SEL upd = NSSelectorFromString(@"_updateModuleInstances");
+        if ([im respondsToSelector:upd]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(im, upd); } @catch (NSException *e) {}
+        }
+    });
+}

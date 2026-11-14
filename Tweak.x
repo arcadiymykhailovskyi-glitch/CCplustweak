@@ -281,6 +281,21 @@ static CGRect CXFrameInSpace(UIView *v, UIView *space) {
     return [v.superview convertRect:CXBaseFrame(v) toView:space];
 }
 
+// Где сейчас лежит каждый модуль (собственная раскладка Control Center, без наших сдвигов)
+static NSDictionary<NSString *, NSValue *> *CXSnapshotBase(void) {
+    UIView *space = CXSpace();
+    NSMutableDictionary<NSString *, NSValue *> *d = [NSMutableDictionary new];
+    if (!space) return d;
+    for (UIViewController *o in gContainers.allObjects) {
+        if (!o.isViewLoaded || !o.view.window || !o.view.superview) continue;
+        NSString *oid = [(CCUIContentModuleContainerViewController *)o moduleIdentifier];
+        if (!oid) continue;
+        CGRect f = CXFrameInSpace(o.view, space);
+        d[oid] = [NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f))];
+    }
+    return d;
+}
+
 // Модуль под пальцем (координаты точки: в слое редактирования)
 static CCUIContentModuleContainerViewController *CXModuleAtPoint(UIView *host, CGPoint p) {
     for (UIViewController *o in gContainers.allObjects) {
@@ -1116,18 +1131,30 @@ static void CXDragEnd(void) {
 
     NSArray<NSString *> *removed = CXPlanRemovedList();
     NSArray<NSString *> *added = CXPlanAddedList();
+    NSDictionary<NSString *, NSValue *> *before = CXSnapshotBase();
 
-    // Порядок модулей без респринга не обновить. Остальное пробуем применить «вживую».
-    if (CXPlanApplyLive()) {
-        CXSmoothRespring();
-        return;
-    }
+    // Записываем всё. Если менялся порядок, просим Control Center пересобрать модули «вживую».
+    BOOL reordered = CXPlanApplyLive();
+    if (reordered) CXForceReloadModules();
 
     __weak CCUIModularControlCenterOverlayViewController *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    double wait = reordered ? 1.6 : 0.9;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         BOOL ok = YES;
         for (NSString *r in removed) if (CXIsShown(r)) ok = NO;
         for (NSString *a in added) if (!CXIsShown(a)) ok = NO;
+        if (ok && reordered) {
+            // Порядок применился, если Control Center сам переставил модули (их места изменились)
+            NSDictionary<NSString *, NSValue *> *after = CXSnapshotBase();
+            BOOL moved = NO;
+            for (NSString *i in after) {
+                NSValue *b = before[i];
+                if (!b) continue;
+                CGPoint pa = after[i].CGPointValue, pb = b.CGPointValue;
+                if (hypot(pa.x - pb.x, pa.y - pb.y) > 3) { moved = YES; break; }
+            }
+            ok = moved;
+        }
         if (ok) {
             CXPlanClear();                 // всё применилось без респринга
             CXHaptic();
@@ -1349,6 +1376,38 @@ static void CXDragEnd(void) {
     if (!ident || !CXIsRemovable(ident)) return;
     CGPoint p = [g locationInView:self.view];
     if (p.x <= 46 && p.y <= 46) CXToggleRemoveOnce(ident);
+}
+
+%end
+
+// ---------- В режиме редактирования жесты самого Control Center «проваливаются» ----------
+//
+// Раскрытие яркости и громкости, закрытие по тапу или свайпу, нажатия на кнопки модулей: всё это жесты
+// Control Center. Отключать их по одному ненадёжно: он сам включает их обратно. Поэтому пока идёт
+// редактирование, любой чужой жест в окне Control Center не может перейти в состояние «начался» и
+// сразу получает «не сработал». Наши жесты (кнопки, шторка, слой редактирования) это не затрагивает,
+// прокрутка страниц тоже остаётся.
+
+static BOOL CXShouldBlockGesture(UIGestureRecognizer *g) {
+    UIView *v = g.view;
+    if (!v || !gCCWindow || v.window != gCCWindow) return NO;
+    for (UIView *x = v; x; x = x.superview) {
+        if (x == gHost || [x isKindOfClass:CXHostView.class] || [x isKindOfClass:CXEditOverlay.class]) return NO;
+    }
+    if ([v isKindOfClass:UIScrollView.class] && g == ((UIScrollView *)v).panGestureRecognizer) return NO;
+    return YES;
+}
+
+%hook UIGestureRecognizer
+
+- (void)setState:(UIGestureRecognizerState)state {
+    if (gEditing && self.state == UIGestureRecognizerStatePossible &&
+        (state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateEnded) &&
+        CXShouldBlockGesture(self)) {
+        %orig(UIGestureRecognizerStateFailed);
+        return;
+    }
+    %orig;
 }
 
 %end
