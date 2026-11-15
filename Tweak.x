@@ -135,6 +135,7 @@ static void CXSuspendCCGestures(UIView *rootView, BOOL suspend) {
 
 @interface CCUIModularControlCenterOverlayViewController : UIViewController
 - (void)cx_setEditing:(BOOL)on;
+- (void)cx_forceResetEditing;
 - (void)cx_plusTapped;
 - (void)cx_doneTapped;
 - (void)cx_cancelTapped;
@@ -878,6 +879,7 @@ static void CXDragEnd(void) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    [self cx_forceResetEditing];     // каждое открытие Control Center начинается без «залипшего» состояния
     UIView *parent = self.view.window;
     if (!parent) return;
     if (!gDotsHost || gDotsHost.superview != parent) {
@@ -905,14 +907,35 @@ static void CXDragEnd(void) {
     gDotsHost = nil;
     [UIView animateWithDuration:0.2 animations:^{ dots.alpha = 0; } completion:^(BOOL f) { [dots removeFromSuperview]; }];
     // Control Center закрыли (например, кнопкой Home), не нажав «Применить»: изменения отменяются
-    if (gEditing) {
-        CXPlanReset();
-        [self cx_setEditing:NO];
+    CXPlanReset();
+    [self cx_forceResetEditing];
+}
+
+%new
+- (void)cx_forceResetEditing {
+    // Полный сброс редактирования, даже если что-то «залипло» (шторка, перетаскивание, слой, жесты)
+    if (gSheet) [gSheet forceClose];
+    gSheet = nil;
+    CXDragEnd();
+    gShield.hidden = YES;
+    gShield = nil;
+    if (gHost) { [gHost removeFromSuperview]; gHost = nil; }
+    CXSuspendCCGestures(nil, NO);
+    BOOL wasEditing = gEditing;
+    gEditing = NO;
+    if (CXPlanHasChanges()) CXPlanClear();
+    if (wasEditing) {
+        gPageCache = nil;
+        UIScrollView *sv = CXFindScrollView();
+        if (sv) CXRestoreInsets(sv);
     }
+    [[NSNotificationCenter defaultCenter] postNotificationName:kEditNote object:nil];
 }
 
 %new
 - (void)cx_pagerTick:(CADisplayLink *)link {
+    // Страховка: слой редактирования есть, а Control Center уже скрыт: сбрасываем
+    if (gEditing && !self.view.window) { [self cx_forceResetEditing]; return; }
     UIScrollView *sv = CXFindScrollView();
     if (!sv) { CXUpdateDots(0, 0); return; }
 
@@ -944,15 +967,27 @@ static void CXDragEnd(void) {
 
 %new
 - (void)cx_longPressed:(UILongPressGestureRecognizer *)g {
-    if (g.state == UIGestureRecognizerStateBegan && !gEditing) {
-        CXHaptic();
-        [self cx_setEditing:YES];
+    if (g.state != UIGestureRecognizerStateBegan || gEditing) return;
+
+    // Зажатие НА модуле (яркость, громкость и т.д.) это штатное раскрытие самого Control Center.
+    // Если в этот момент включить редактирование, раскрытый модуль остаётся «висеть» поверх сетки.
+    // Поэтому редактирование включается только долгим нажатием на пустое место (или у самого верха экрана).
+    CGPoint p = [g locationInView:self.view];
+    if (p.y > 64) {
+        for (UIViewController *o in gContainers.allObjects) {
+            if (!o.isViewLoaded || !o.view.window) continue;
+            CGRect r = [self.view convertRect:o.view.bounds fromView:o.view];
+            if (CGRectContainsPoint(r, p)) return;
+        }
     }
+    CXHaptic();
+    [self cx_setEditing:YES];
 }
 
 %new
 - (void)cx_setEditing:(BOOL)on {
     if (gEditing == on) return;
+    if (on && gSheet) { [gSheet forceClose]; gSheet = nil; }
     gEditing = on;
     CXInvalidateCache();
     if (!on) CXSuspendCCGestures(nil, NO);
@@ -1372,6 +1407,7 @@ static void CXDragEnd(void) {
 
 static BOOL CXShouldBlockGesture(UIGestureRecognizer *g) {
     UIView *v = g.view;
+    if (!gHost || !gHost.window) return NO;    // слоя редактирования нет: ничего не блокируем
     if (!v || !gCCWindow || v.window != gCCWindow) return NO;
     for (UIView *x = v; x; x = x.superview) {
         if (x == gHost || [x isKindOfClass:CXHostView.class] || [x isKindOfClass:CXEditOverlay.class]) return NO;
@@ -1380,11 +1416,23 @@ static BOOL CXShouldBlockGesture(UIGestureRecognizer *g) {
     return YES;
 }
 
+%hook UIView
+
+// Официальная точка, где вид решает, можно ли жесту начаться: в режиме редактирования отвечаем «нет»
+// на все жесты Control Center (раскрытие, закрытие, нажатия на кнопки модулей).
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
+    if (gEditing && CXShouldBlockGesture(gr)) return NO;
+    return %orig;
+}
+
+%end
+
 %hook UIGestureRecognizer
 
+// Запасная точка: если жест всё же пытается начаться, сразу сообщаем «не сработал»
 - (void)setState:(UIGestureRecognizerState)state {
     if (gEditing && self.state == UIGestureRecognizerStatePossible &&
-        (state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateEnded) &&
+        state != UIGestureRecognizerStateFailed && state != UIGestureRecognizerStateCancelled &&
         CXShouldBlockGesture(self)) {
         %orig(UIGestureRecognizerStateFailed);
         return;

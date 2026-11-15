@@ -5,4 +5,6 @@
 @property (nonatomic, copy) void (^onClose)(void);
 - (void)showInView:(UIView *)host parent:(UIViewController *)parent;
 - (void)closeSheet;
+// Мгновенно убирает шторку без анимации (на случай, если обычное закрытие не сработало)
+- (void)forceClose;
 @end

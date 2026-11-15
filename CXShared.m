@@ -30,9 +30,52 @@ static NSArray *CXArrayFrom(id r) {
     return @[];
 }
 
+static id CXManager(void);
+
+// Ищем объект нужного класса в полях другого объекта (на несколько уровней вглубь)
+static id CXFindObject(id root, Class target, int depth, NSMutableSet *seen) {
+    if (!root || depth < 0 || !target) return nil;
+    NSValue *key = [NSValue valueWithNonretainedObject:root];
+    if ([seen containsObject:key]) return nil;
+    [seen addObject:key];
+    if ([root isKindOfClass:target]) return root;
+    if ([root isKindOfClass:NSString.class] || [root isKindOfClass:NSNumber.class] || [root isKindOfClass:NSData.class] ||
+        [root isKindOfClass:NSDate.class] || [root isKindOfClass:NSArray.class] || [root isKindOfClass:NSDictionary.class] ||
+        [root isKindOfClass:NSSet.class] || [root isKindOfClass:UIView.class] || [root isKindOfClass:UIViewController.class]) return nil;
+
+    for (Class c = object_getClass(root); c && c != NSObject.class; c = class_getSuperclass(c)) {
+        unsigned n = 0;
+        Ivar *iv = class_copyIvarList(c, &n);
+        for (unsigned i = 0; i < n; i++) {
+            const char *t = ivar_getTypeEncoding(iv[i]);
+            if (!t || t[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(root, iv[i]); } @catch (NSException *e) { v = nil; }
+            if (!v) continue;
+            id found = CXFindObject(v, target, depth - 1, seen);
+            if (found) { free(iv); return found; }
+        }
+        free(iv);
+    }
+    return nil;
+}
+
+// Настройки пишем через ТОТ ЖЕ объект, которым пользуется сам Control Center. Если писать через новый,
+// у Control Center остаётся своя «старая копия» настроек, и она со временем перезаписывает наши изменения.
+static id gLiveProv = nil;
+static BOOL gLiveProvSearched = NO;
+
 static id CXNewProvider(void) {
-    Class c = NSClassFromString(@"CCSModuleSettingsProvider");
-    return c ? [[c alloc] init] : nil;
+    Class pc = NSClassFromString(@"CCSModuleSettingsProvider");
+    if (!pc) return nil;
+    if (!gLiveProv && !gLiveProvSearched) {
+        id im = CXManager();
+        if (im) {
+            gLiveProv = CXFindObject(im, pc, 5, [NSMutableSet new]);
+            gLiveProvSearched = YES;
+        }
+    }
+    return gLiveProv ?: [[pc alloc] init];
 }
 
 static NSArray *CXProvList(id prov, NSString *selName) {
@@ -161,6 +204,8 @@ static NSArray *gCacheFx = nil, *gCacheUf = nil, *gCacheUe = nil;
 
 void CXInvalidateCache(void) {
     gCacheFx = nil; gCacheUf = nil; gCacheUe = nil;
+    gLiveProv = nil;               // Control Center мог создать новый объект настроек: ищем заново
+    gLiveProvSearched = NO;
 }
 
 static void CXLoadCache(void) {
@@ -271,7 +316,30 @@ static void CXApplyRemove(NSString *ident) {
     }
 }
 
+// Если модуль числится среди «отключённых пользователем», он не появится, сколько его ни добавляй.
+// Возвращаем ему видимость через репозиторий модулей (так делает сам Control Center в Настройках).
+static void CXEnableVisibility(NSString *ident) {
+    id prov = CXNewProvider();
+    NSArray *disabled = CXProvList(prov, @"userDisabledModuleIdentifiers");
+    if (![disabled containsObject:ident]) return;
+
+    id repo = CXFindObject(CXManager(), NSClassFromString(@"CCSModuleRepository"), 4, [NSMutableSet new]);
+    SEL vis = NSSelectorFromString(@"visibilityForModuleIdentifier:");
+    SEL setVis = NSSelectorFromString(@"setVisibility:forModuleIdentifier:");
+    if (!repo || ![repo respondsToSelector:vis] || ![repo respondsToSelector:setVis]) return;
+
+    // Какое значение означает «включён»: смотрим на модуль, который сейчас точно включён
+    NSArray *enabled = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
+    NSString *probe = enabled.firstObject;
+    if (!probe) return;
+    @try {
+        NSUInteger onVal = ((NSUInteger (*)(id, SEL, id))objc_msgSend)(repo, vis, probe) & 0xFF;
+        ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(repo, setVis, onVal, ident);
+    } @catch (NSException *e) {}
+}
+
 static void CXApplyAdd(NSString *ident) {
+    CXEnableVisibility(ident);
     id prov = CXNewProvider();
     NSArray *fx = CXProvList(prov, @"orderedFixedModuleIdentifiers");
     NSArray *ue = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
@@ -371,6 +439,8 @@ NSArray<NSString *> *CXPlanAddedList(void) { return [gPlanAdd array] ?: @[]; }
 // такие правки оставляли виджеты висеть сверху и «мёртвыми». Control Center сам перечитывает
 // настройки при следующем открытии.
 void CXPlanApplyPersist(void) {
+    gLiveProv = nil;
+    gLiveProvSearched = NO;
     for (NSString *r in [gPlanRemove array]) CXApplyRemove(r);
     for (NSString *a in [gPlanAdd array]) CXApplyAdd(a);
     if (gPlanOrder.count) CXApplyOrder(gPlanOrder);

@@ -218,9 +218,20 @@
     }
 }
 
+- (void)forceClose {
+    [self.search resignFirstResponder];
+    [self.backdrop removeFromSuperview];
+    [self.view removeFromSuperview];
+    [self willMoveToParentViewController:nil];
+    [self removeFromParentViewController];
+    void (^cb)(void) = self.onClose;
+    self.onClose = nil;
+    if (cb) cb();
+}
+
 - (void)closeSheet {
     UIView *v = self.view;
-    if (!v.superview) return;
+    if (!v.superview) { [self forceClose]; return; }   // иначе шторка «залипала» и «+» переставал работать
     [self.search resignFirstResponder];
     [UIView animateWithDuration:0.28 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
         v.frame = CGRectMake(0, v.superview.bounds.size.height, v.frame.size.width, v.frame.size.height);
