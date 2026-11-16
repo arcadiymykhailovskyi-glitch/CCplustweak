@@ -37,3 +37,12 @@ NSArray<NSString *> *CXPlanAddedList(void);
 // Записывает план в настройки Control Center (без управления модулями «вживую»)
 void CXPlanApplyPersist(void);
 void CXRespringNow(void);
+
+// ---------- Язык и названия ----------
+// Русский интерфейс для русскоязычных систем, английский для остальных
+BOOL CXIsRussian(void);
+#define CXL(ru, en) (CXIsRussian() ? (ru) : (en))
+NSString *CXCategoryTitle(NSString *key);
+NSString *CXModuleDisplayName(NSString *ident);
+// Убирает модули из настроек (например, те, что не поддерживаются этим устройством)
+void CXForgetModules(NSArray<NSString *> *ids);

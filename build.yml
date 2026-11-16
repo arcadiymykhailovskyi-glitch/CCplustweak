@@ -1,0 +1,27 @@
+name: Build Rootless Deb
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ldid dpkg make
+      - run: git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+      - name: Build rootless (Dopamine, palera1n)
+        run: |
+          export THEOS="$HOME/theos"
+          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
+          make package FINALPACKAGE=1
+          mkdir -p out
+          cp packages/*.deb out/
+      - name: Build rootful (palera1n -f, checkra1n)
+        run: |
+          export THEOS="$HOME/theos"
+          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME= ARCHS=arm64
+          cp packages/*.deb out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CCPlus-deb
+          path: out/*.deb

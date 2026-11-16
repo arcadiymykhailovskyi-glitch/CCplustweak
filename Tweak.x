@@ -72,7 +72,6 @@ static CXHostView *gHost = nil;
 // сверху оно начинается ниже кнопок, а пока открыта шторка, оно временно прячется.
 static UIWindow *gShield = nil;
 static __weak UIWindow *gCCWindow = nil;
-static const CGFloat kShieldTop = 76;
 
 static void CXShieldSetActive(BOOL active) {
     gShield.hidden = !active;
@@ -82,7 +81,9 @@ static void CXShowShieldWindow(UIWindow *cc, id target) {
     gShield.hidden = YES;
     gCCWindow = cc;
     CGRect b = UIScreen.mainScreen.bounds;
-    UIWindow *w = [[UIWindow alloc] initWithFrame:CGRectMake(0, kShieldTop, b.size.width, b.size.height - kShieldTop)];
+    // Ряд кнопок лежит ниже строки состояния или выреза, поэтому на разных устройствах верх щита разный
+    CGFloat shieldTop = MAX(76.0, cc.safeAreaInsets.top + 52.0);
+    UIWindow *w = [[UIWindow alloc] initWithFrame:CGRectMake(0, shieldTop, b.size.width, b.size.height - shieldTop)];
     if (cc.windowScene) w.windowScene = cc.windowScene;
     w.windowLevel = cc.windowLevel + 1;
     w.backgroundColor = UIColor.clearColor;
@@ -208,8 +209,8 @@ static void CXToggleRemoveOnce(NSString *ident) {
 }
 
 // Короткая подсказка внизу экрана
-static void CXToastFor(NSString *text, double hold) {
-    if (!gHost) return;
+static void CXToastInView(UIView *parent, NSString *text, double hold) {
+    if (!parent) return;
     UILabel *l = [UILabel new];
     l.text = text;
     l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
@@ -218,18 +219,32 @@ static void CXToastFor(NSString *text, double hold) {
     l.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.7];
     l.layer.cornerRadius = 15;
     l.clipsToBounds = YES;
-    CGSize sz = [l sizeThatFits:CGSizeMake(gHost.bounds.size.width - 60, 40)];
+    CGSize sz = [l sizeThatFits:CGSizeMake(parent.bounds.size.width - 60, 40)];
     l.frame = CGRectMake(0, 0, sz.width + 28, 30);
-    l.center = CGPointMake(gHost.bounds.size.width / 2, gHost.bounds.size.height - 70);
+    l.center = CGPointMake(parent.bounds.size.width / 2, parent.bounds.size.height - 70);
     l.alpha = 0;
-    [gHost addSubview:l];
+    [parent addSubview:l];
     [UIView animateWithDuration:0.2 animations:^{ l.alpha = 1; } completion:^(BOOL f) {
         [UIView animateWithDuration:0.3 delay:hold options:0 animations:^{ l.alpha = 0; }
                          completion:^(BOOL f2) { [l removeFromSuperview]; }];
     }];
 }
 
+static void CXToastFor(NSString *text, double hold) { CXToastInView(gHost, text, hold); }
 static void CXToast(NSString *text) { CXToastFor(text, 1.4); }
+
+// Модуль сейчас показан на экране
+static BOOL CXIsShown(NSString *ident) {
+    for (UIViewController *o in gContainers.allObjects) {
+        if (!o.isViewLoaded || !o.view.window) continue;
+        CCUIContentModuleContainerViewController *c = (CCUIContentModuleContainerViewController *)o;
+        if ([[c moduleIdentifier] isEqualToString:ident]) return YES;
+    }
+    return NO;
+}
+
+// Добавленные модули, появление которых проверяем после «перезахода» (не все модули есть на любом устройстве)
+static NSArray<NSString *> *gVerifyAdded = nil;
 
 // «Перезаход» в Control Center: закрываем и открываем заново, чтобы он перечитал настройки и
 // заново разложил модули. Возвращает NO, если системный контроллер недоступен.
@@ -793,7 +808,7 @@ static void CXDragBegin(UILongPressGestureRecognizer *g, CCUIContentModuleContai
 
     if (!CXBuildGrid() || !gInfo[[vc moduleIdentifier]]) {
         CXHaptic();
-        CXToast(@"Некуда переместить");
+        CXToast(CXL(@"Некуда переместить", @"Nowhere to move it"));
         return;
     }
 
@@ -880,6 +895,26 @@ static void CXDragEnd(void) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     [self cx_forceResetEditing];     // каждое открытие Control Center начинается без «залипшего» состояния
+
+    // Проверяем, появились ли добавленные модули. Если нет (например, «Режим сна» на устройстве без нужных
+    // возможностей), честно сообщаем и убираем их из настроек, чтобы не оставались «призраками».
+    if (gVerifyAdded.count) {
+        NSArray<NSString *> *ids = gVerifyAdded;
+        gVerifyAdded = nil;
+        __weak CCUIModularControlCenterOverlayViewController *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NSMutableArray<NSString *> *missing = [NSMutableArray new];
+            for (NSString *i in ids) if (!CXIsShown(i)) [missing addObject:i];
+            if (!missing.count) return;
+            CXForgetModules(missing);
+            NSMutableArray<NSString *> *names = [NSMutableArray new];
+            for (NSString *i in missing) [names addObject:CXModuleDisplayName(i)];
+            NSString *msg = [NSString stringWithFormat:CXL(@"Не поддерживается на этом устройстве: %@",
+                                                          @"Not supported on this device: %@"),
+                             [names componentsJoinedByString:@", "]];
+            CXToastInView(weakSelf.view.window, msg, 3.5);
+        });
+    }
     UIView *parent = self.view.window;
     if (!parent) return;
     if (!gDotsHost || gDotsHost.superview != parent) {
@@ -1002,9 +1037,9 @@ static void CXDragEnd(void) {
 
         UIButton *plus = CXPill(nil, @"plus", kTagPlus);
         [plus addTarget:self action:@selector(cx_plusTapped) forControlEvents:UIControlEventTouchUpInside];
-        UIButton *done = CXPill(@"Готово", nil, kTagDone);
+        UIButton *done = CXPill(CXL(@"Готово", @"Done"), nil, kTagDone);
         [done addTarget:self action:@selector(cx_doneTapped) forControlEvents:UIControlEventTouchUpInside];
-        UIButton *cancel = CXPill(@"Отмена", nil, kTagCancel);
+        UIButton *cancel = CXPill(CXL(@"Отмена", @"Cancel"), nil, kTagCancel);
         [cancel addTarget:self action:@selector(cx_cancelTapped) forControlEvents:UIControlEventTouchUpInside];
         cancel.alpha = 0;
         [host addSubview:plus];
@@ -1136,7 +1171,8 @@ static void CXDragEnd(void) {
     UIButton *done = (UIButton *)[gHost viewWithTag:kTagDone];
     UIButton *cancel = (UIButton *)[gHost viewWithTag:kTagCancel];
     BOOL pend = CXPlanHasChanges();
-    NSString *title = pend ? [NSString stringWithFormat:@"Применить (%lu)", (unsigned long)CXPlanCount()] : @"Готово";
+    NSString *title = pend ? [NSString stringWithFormat:CXL(@"Применить (%lu)", @"Apply (%lu)"), (unsigned long)CXPlanCount()]
+                           : CXL(@"Готово", @"Done");
 
     [UIView performWithoutAnimation:^{
         [done setTitle:title forState:UIControlStateNormal];
@@ -1161,11 +1197,12 @@ static void CXDragEnd(void) {
     done.userInteractionEnabled = NO;
     cancel.userInteractionEnabled = NO;
     [UIView performWithoutAnimation:^{
-        [done setTitle:@"Применяю…" forState:UIControlStateNormal];
+        [done setTitle:CXL(@"Применяю…", @"Applying…") forState:UIControlStateNormal];
         [done layoutIfNeeded];
     }];
 
     // Записываем в настройки и «перезаходим» в Control Center: он заново разложит модули в новом порядке.
+    gVerifyAdded = [CXPlanAddedList() copy];
     CXPlanApplyPersist();
     CXPlanClear();
     BOOL reopened = CXReopenControlCenter();
@@ -1174,7 +1211,7 @@ static void CXDragEnd(void) {
     if (reopened) {
         [self cx_setEditing:NO];
     } else {
-        CXToastFor(@"Сохранено. Закройте и снова откройте Пункт управления", 2.2);
+        CXToastFor(CXL(@"Сохранено. Закройте и снова откройте Пункт управления", @"Saved. Close and reopen Control Center"), 2.2);
         __weak CCUIModularControlCenterOverlayViewController *weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [weakSelf cx_setEditing:NO];

@@ -144,7 +144,7 @@
     self.search.searchTextField.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
     self.search.searchTextField.textColor = UIColor.whiteColor;
     self.search.searchTextField.attributedPlaceholder =
-        [[NSAttributedString alloc] initWithString:@"Поиск элементов"
+        [[NSAttributedString alloc] initWithString:CXL(@"Поиск элементов", @"Search controls")
                                         attributes:@{ NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.55] }];
     [self.header addSubview:self.search];
 
@@ -337,7 +337,7 @@
                                  atIndexPath:(NSIndexPath *)ip {
     CXHeader *h = [cv dequeueReusableSupplementaryViewOfKind:kind withReuseIdentifier:@"head" forIndexPath:ip];
     NSString *title = self.sectionTitles[ip.section];
-    h.title.text = title;
+    h.title.text = CXCategoryTitle(title);
     h.icon.image = [UIImage systemImageNamed:CXCategoryIcon(title)];
     return h;
 }

@@ -198,6 +198,32 @@ static NSString *CXRussianName(NSString *k) {
     return nil;
 }
 
+// ---------- Язык ----------
+
+BOOL CXIsRussian(void) {
+    static BOOL ru = NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *l = [NSLocale preferredLanguages].firstObject ?: @"";
+        ru = [l hasPrefix:@"ru"] || [l hasPrefix:@"uk"] || [l hasPrefix:@"be"];
+    });
+    return ru;
+}
+
+NSString *CXCategoryTitle(NSString *key) {
+    if (CXIsRussian()) return key;
+    NSDictionary *m = @{ @"Связь": @"Connectivity", @"Захват": @"Capture", @"Часы": @"Clock",
+                         @"Экран и звук": @"Display & Sound", @"Фокус и питание": @"Focus & Power",
+                         @"Медиа": @"Media", @"Универсальный доступ": @"Accessibility",
+                         @"Дом": @"Home", @"Другое": @"Other" };
+    return m[key] ?: key;
+}
+
+NSString *CXModuleDisplayName(NSString *ident) {
+    NSString *key = CXKey(ident);
+    return (CXIsRussian() ? CXRussianName(key) : nil) ?: CXShortID(ident);
+}
+
 // ---------- Данные о модулях ----------
 
 static NSArray *gCacheFx = nil, *gCacheUf = nil, *gCacheUe = nil;
@@ -286,7 +312,7 @@ NSArray<NSDictionary *> *CXAvailableModules(void) {
         if ([fixed containsObject:ident] && ![userFixed containsObject:ident]) continue;
 
         NSString *key = CXKey(ident);
-        NSString *name = CXRussianName(key) ?: bundleNames[ident] ?: CXShortID(ident);
+        NSString *name = (CXIsRussian() ? CXRussianName(key) : nil) ?: bundleNames[ident] ?: CXShortID(ident);
         [result addObject:@{ @"id": ident, @"name": name,
                              @"category": CXCategoryFor(key), @"icon": CXIconFor(key) }];
     }
@@ -371,6 +397,10 @@ static void CXApplyOrder(NSArray<NSString *> *order) {
     }
     for (NSString *i in ue) if (![n containsObject:i] && ![gPlanRemove containsObject:i]) [n addObject:i];
     CXProvSet(prov, @"setAndSaveOrderedUserEnabledModuleIdentifiers:", n);
+}
+
+void CXForgetModules(NSArray<NSString *> *ids) {
+    for (NSString *i in ids) CXApplyRemove(i);
 }
 
 // ---------- План изменений ----------
