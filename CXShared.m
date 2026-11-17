@@ -179,6 +179,33 @@ static NSString *CXIconFor(NSString *k) {
     return @"square.grid.2x2.fill";
 }
 
+// Цвета плиток в выборе: как у системных значков (оранжевые часы, красная запись, индиго для сна и т.д.)
+static UIColor *CXRGB(NSInteger hex) {
+    return [UIColor colorWithRed:((hex >> 16) & 0xFF) / 255.0 green:((hex >> 8) & 0xFF) / 255.0
+                            blue:(hex & 0xFF) / 255.0 alpha:1.0];
+}
+
+static UIColor *CXColorFor(NSString *k) {
+    NSArray *map = @[
+        @[@"connectiv", @0x30D158], @[@"airplane", @0xFF9F0A],
+        @[@"screencapture", @0xFF453A], @[@"voicememo", @0xFF453A],
+        @[@"videoconference", @0x5E5CE6], @[@"audioconference", @0x5E5CE6],
+        @[@"flashlight", @0x636366], @[@"torch", @0x636366], @[@"camera", @0x636366],
+        @[@"magnif", @0x0A84FF], @[@"recognition", @0x0A84FF], @[@"shazam", @0x0A84FF],
+        @[@"stopwatch", @0xFF9F0A], @[@"alarm", @0xFF9F0A], @[@"timer", @0xFF9F0A], @[@"calculator", @0xFF9F0A],
+        @[@"sleep", @0x5E5CE6], @[@"focus", @0x5E5CE6], @[@"donotdisturb", @0x5E5CE6],
+        @[@"lowpower", @0xFFD60A], @[@"home", @0xFF9F0A],
+        @[@"display", @0x0A84FF], @[@"audio", @0xFF375F], @[@"mirror", @0x0A84FF], @[@"orientation", @0xFF453A],
+        @[@"silence", @0xFF453A], @[@"mute", @0xFF453A],
+        @[@"nfc", @0x30B0C7], @[@"barcode", @0x636366],
+        @[@"hearing", @0x0A84FF], @[@"accessib", @0x0A84FF], @[@"textsize", @0x0A84FF],
+        @[@"darkmode", @0x636366], @[@"guided", @0x0A84FF], @[@"remote", @0x636366],
+        @[@"note", @0xFFD60A], @[@"wallet", @0x30D158], @[@"nowplaying", @0xFF375F],
+    ];
+    for (NSArray *pair in map) if ([k containsString:pair[0]]) return CXRGB([pair[1] integerValue]);
+    return CXRGB(0x48484A);
+}
+
 static NSString *CXRussianName(NSString *k) {
     NSArray *map = @[
         @[@"flashlight", @"Фонарик"], @[@"torch", @"Фонарик"],
@@ -314,7 +341,8 @@ NSArray<NSDictionary *> *CXAvailableModules(void) {
         NSString *key = CXKey(ident);
         NSString *name = (CXIsRussian() ? CXRussianName(key) : nil) ?: bundleNames[ident] ?: CXShortID(ident);
         [result addObject:@{ @"id": ident, @"name": name,
-                             @"category": CXCategoryFor(key), @"icon": CXIconFor(key) }];
+                             @"category": CXCategoryFor(key), @"icon": CXIconFor(key),
+                             @"color": CXColorFor(key) }];
     }
     NSSortDescriptor *sd = [NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
                                                          selector:@selector(localizedCaseInsensitiveCompare:)];

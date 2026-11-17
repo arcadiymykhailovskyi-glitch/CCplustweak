@@ -134,6 +134,9 @@ static void CXSuspendCCGestures(UIView *rootView, BOOL suspend) {
     }
 }
 
+@interface CCUIHeaderPocketView : UIView
+@end
+
 @interface CCUIModularControlCenterOverlayViewController : UIViewController
 - (void)cx_setEditing:(BOOL)on;
 - (void)cx_forceResetEditing;
@@ -169,8 +172,10 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
     b.tintColor = UIColor.whiteColor;
     b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.25];
     b.layer.cornerRadius = 16;
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    b.contentEdgeInsets = UIEdgeInsetsMake(7, 16, 7, 16);
+    // На узких экранах (iPhone SE, ширина 320) кнопки делаем компактнее, чтобы «Применить», «Отмена» и «+» не налезали друг на друга
+    BOOL narrow = UIScreen.mainScreen.bounds.size.width < 340;
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:narrow ? 13 : 15];
+    b.contentEdgeInsets = narrow ? UIEdgeInsetsMake(6, 11, 6, 11) : UIEdgeInsetsMake(7, 16, 7, 16);
     if (symbol) [b setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
     if (title) [b setTitle:title forState:UIControlStateNormal];
     b.translatesAutoresizingMaskIntoConstraints = NO;
@@ -781,8 +786,8 @@ static void CXDragFrame(void) {
         CGFloat H = sv.window.bounds.size.height;
         CGFloat y = [g locationInView:nil].y;
         CGFloat speed = 0;
-        if (y > H - 110) speed = (y - (H - 110)) / 110.0 * 14.0;
-        else if (y < 120) speed = -((120.0 - y) / 120.0) * 14.0;
+        if (y > H - 130) speed = (y - (H - 130)) / 130.0 * 18.0;
+        else if (y < 140) speed = -((140.0 - y) / 140.0) * 18.0;
         if (fabs(speed) > 0.5) {
             CGFloat minY = -sv.adjustedContentInset.top;
             CGFloat maxY = MAX(minY, sv.contentSize.height - sv.bounds.size.height + sv.adjustedContentInset.bottom);
@@ -818,6 +823,7 @@ static void CXDragBegin(UILongPressGestureRecognizer *g, CCUIContentModuleContai
     gDragBase = v.transform;
     gDragLoc0 = [g locationInView:sup];
     gDragScroll = CXFindScrollView();
+    if (gDragScroll) CXPageOffsets(gDragScroll);   // убеждаемся, что есть куда прокручивать
     [v.layer removeAnimationForKey:@"cx_wobble"];
     [sup bringSubviewToFront:v];
     v.layer.zPosition = 100;
@@ -887,6 +893,15 @@ static void CXDragEnd(void) {
     lp.cancelsTouchesInView = NO;
     [self.view addGestureRecognizer:lp];
 
+    // Второй способ войти в редактирование: зажать ДВУМЯ пальцами в любом месте.
+    // Нужен на маленьких экранах (iPhone SE), где модули занимают всё место и пустого пятачка нет.
+    UILongPressGestureRecognizer *lp2 =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(cx_longPressed:)];
+    lp2.numberOfTouchesRequired = 2;
+    lp2.minimumPressDuration = 0.5;
+    lp2.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:lp2];
+
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(cx_refreshButtons)
                                                  name:CXPlanNote object:nil];
@@ -906,11 +921,10 @@ static void CXDragEnd(void) {
             NSMutableArray<NSString *> *missing = [NSMutableArray new];
             for (NSString *i in ids) if (!CXIsShown(i)) [missing addObject:i];
             if (!missing.count) return;
-            CXForgetModules(missing);
             NSMutableArray<NSString *> *names = [NSMutableArray new];
             for (NSString *i in missing) [names addObject:CXModuleDisplayName(i)];
-            NSString *msg = [NSString stringWithFormat:CXL(@"Не поддерживается на этом устройстве: %@",
-                                                          @"Not supported on this device: %@"),
+            NSString *msg = [NSString stringWithFormat:CXL(@"Не появился (нужны настройки или приложение): %@",
+                                                          @"Not shown (needs setup or an app): %@"),
                              [names componentsJoinedByString:@", "]];
             CXToastInView(weakSelf.view.window, msg, 3.5);
         });
@@ -1008,7 +1022,7 @@ static void CXDragEnd(void) {
     // Если в этот момент включить редактирование, раскрытый модуль остаётся «висеть» поверх сетки.
     // Поэтому редактирование включается только долгим нажатием на пустое место (или у самого верха экрана).
     CGPoint p = [g locationInView:self.view];
-    if (p.y > 64) {
+    if (g.numberOfTouches < 2 && p.y > 64) {
         for (UIViewController *o in gContainers.allObjects) {
             if (!o.isViewLoaded || !o.view.window) continue;
             CGRect r = [self.view convertRect:o.view.bounds fromView:o.view];
@@ -1478,3 +1492,89 @@ static BOOL CXShouldBlockGesture(UIGestureRecognizer *g) {
 }
 
 %end
+
+// ---------- Модули, у которых нет «приложения-пары» или возможностей, всё равно загружаются ----------
+//
+// Repository Control Center отфильтровывает модули (например, «Режим сна» без Здоровья или «Дом» без приложения Дом).
+// Если пользователь сам включил такой модуль, возвращаем его в список. Хуки ставятся только если методы
+// действительно возвращают объект (так мы не рискуем сломать вызов).
+
+static NSString *CXMetaID(id meta) {
+    SEL sel = NSSelectorFromString(@"moduleIdentifier");
+    if (!meta || ![meta respondsToSelector:sel]) return nil;
+    id r = ((id (*)(id, SEL))objc_msgSend)(meta, sel);
+    return [r isKindOfClass:NSString.class] ? r : nil;
+}
+
+static id CXRestoreFiltered(id input, id output) {
+    BOOL inOK = [input isKindOfClass:NSSet.class] || [input isKindOfClass:NSArray.class];
+    BOOL outOK = [output isKindOfClass:NSSet.class] || [output isKindOfClass:NSArray.class];
+    if (!inOK || !outOK) return output;
+
+    NSArray *inArr = [input isKindOfClass:NSSet.class] ? [(NSSet *)input allObjects] : input;
+    NSArray *outArr = [output isKindOfClass:NSSet.class] ? [(NSSet *)output allObjects] : output;
+    NSMutableSet<NSString *> *have = [NSMutableSet new];
+    for (id o in outArr) { NSString *i = CXMetaID(o); if (i) [have addObject:i]; }
+
+    NSSet<NSString *> *wanted = CXCurrentEnabledIDs();
+    NSMutableArray *extra = [NSMutableArray new];
+    for (id o in inArr) {
+        NSString *i = CXMetaID(o);
+        if (i && [wanted containsObject:i] && ![have containsObject:i]) [extra addObject:o];
+    }
+    if (!extra.count) return output;
+
+    if ([output isKindOfClass:NSMutableSet.class]) { [(NSMutableSet *)output addObjectsFromArray:extra]; return output; }
+    if ([output isKindOfClass:NSMutableArray.class]) { [(NSMutableArray *)output addObjectsFromArray:extra]; return output; }
+    if ([output isKindOfClass:NSSet.class]) return [(NSSet *)output setByAddingObjectsFromArray:extra];
+    return [(NSArray *)output arrayByAddingObjectsFromArray:extra];
+}
+
+%group FilterFix
+
+%hook CCSModuleRepository
+
+- (id)_queue_filterModuleMetadataByAssociatedBundleAvailability:(id)metadata {
+    id out = %orig;
+    return CXRestoreFiltered(metadata, out);
+}
+
+- (id)_queue_filterModuleMetadataByGestalt:(id)metadata {
+    id out = %orig;
+    return CXRestoreFiltered(metadata, out);
+}
+
+%end
+
+%end
+
+// ---------- Без «блюра» сверху в Control Center ----------
+
+%hook CCUIHeaderPocketView
+
+- (void)layoutSubviews {
+    %orig;
+    for (UIView *sub in self.subviews) {
+        if ([sub isKindOfClass:UIVisualEffectView.class]) { sub.hidden = YES; sub.alpha = 0; }
+    }
+}
+
+%end
+
+%ctor {
+    %init;     // основные хуки
+
+    Class repo = NSClassFromString(@"CCSModuleRepository");
+    SEL s1 = NSSelectorFromString(@"_queue_filterModuleMetadataByAssociatedBundleAvailability:");
+    SEL s2 = NSSelectorFromString(@"_queue_filterModuleMetadataByGestalt:");
+    Method m1 = repo ? class_getInstanceMethod(repo, s1) : NULL;
+    Method m2 = repo ? class_getInstanceMethod(repo, s2) : NULL;
+    BOOL ok = NO;
+    if (m1 && m2) {
+        const char *e1 = method_getTypeEncoding(m1);
+        const char *e2 = method_getTypeEncoding(m2);
+        // возвращают объект и принимают один объект
+        ok = (e1 && e2 && e1[0] == '@' && e2[0] == '@');
+    }
+    if (ok) { %init(FilterFix); }
+}

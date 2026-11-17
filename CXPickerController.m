@@ -8,6 +8,7 @@
 @property (nonatomic, strong) UIImageView *icon;
 @property (nonatomic, strong) UILabel *label;
 @property (nonatomic, strong) UIImageView *check;
+@property (nonatomic, strong) CAGradientLayer *shine;
 @end
 
 @implementation CXTileCell
@@ -18,18 +19,30 @@
         _box.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
         _box.layer.cornerRadius = 17;
         _box.layer.cornerCurve = kCACornerCurveContinuous;
+        _box.clipsToBounds = YES;
+
+        // Лёгкий блик сверху, как у системных значков
+        CAGradientLayer *shine = [CAGradientLayer layer];
+        shine.colors = @[(id)[UIColor colorWithWhite:1.0 alpha:0.26].CGColor, (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor];
+        shine.startPoint = CGPointMake(0.5, 0.0);
+        shine.endPoint = CGPointMake(0.5, 0.75);
+        [_box.layer addSublayer:shine];
+        _shine = shine;
 
         _icon = [UIImageView new];
         _icon.contentMode = UIViewContentModeCenter;
         _icon.tintColor = UIColor.whiteColor;
         _icon.preferredSymbolConfiguration =
-            [UIImageSymbolConfiguration configurationWithPointSize:27 weight:UIImageSymbolWeightMedium];
+            [UIImageSymbolConfiguration configurationWithPointSize:29 weight:UIImageSymbolWeightSemibold];
 
         _label = [UILabel new];
-        _label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
-        _label.textColor = [UIColor colorWithWhite:1.0 alpha:0.88];
+        _label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+        _label.textColor = [UIColor colorWithWhite:1.0 alpha:0.92];
         _label.textAlignment = NSTextAlignmentCenter;
         _label.numberOfLines = 2;
+        _label.lineBreakMode = NSLineBreakByWordWrapping;
+        _label.adjustsFontSizeToFitWidth = YES;
+        _label.minimumScaleFactor = 0.78;
 
         _check = [UIImageView new];
         _check.image = [UIImage systemImageNamed:@"checkmark.circle.fill"];
@@ -50,6 +63,10 @@
     CGFloat s = MIN(w, 64);
     self.box.frame = CGRectMake((w - s) / 2, 0, s, s);
     self.icon.frame = self.box.bounds;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.shine.frame = self.box.bounds;
+    [CATransaction commit];
     self.check.frame = CGRectMake(CGRectGetMaxX(self.box.frame) - 14, -5, 22, 22);
     self.label.frame = CGRectMake(0, s + 6, w, 30);
 }
@@ -115,11 +132,11 @@
     self.view.layer.cornerCurve = kCACornerCurveContinuous;
     self.view.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
 
-    UIVisualEffectView *blur =
-        [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark]];
-    blur.frame = self.view.bounds;
-    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:blur];
+    // Фон шторки: плотный тёмный, без размытия (размытие смотрелось грязно и слепило)
+    UIView *bg = [[UIView alloc] initWithFrame:self.view.bounds];
+    bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    bg.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.12 alpha:0.97];
+    [self.view addSubview:bg];
 
     self.all = CXAvailableModules();
     self.enabled = CXCurrentEnabledIDs();
@@ -355,9 +372,10 @@
     c.check.hidden = !(planned || already);
     c.check.tintColor = planned ? [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0]
                                 : [UIColor colorWithWhite:1.0 alpha:0.55];
-    c.box.alpha = (already && !planned) ? 0.45 : 1.0;
-    c.box.backgroundColor = planned ? [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:0.35]
-                                    : [UIColor colorWithWhite:1.0 alpha:0.14];
+    c.box.alpha = (already && !planned) ? 0.4 : 1.0;
+    c.box.backgroundColor = m[@"color"] ?: [UIColor colorWithWhite:0.28 alpha:1.0];
+    c.box.layer.borderWidth = planned ? 2.5 : 0;
+    c.box.layer.borderColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0].CGColor;
     return c;
 }
 
