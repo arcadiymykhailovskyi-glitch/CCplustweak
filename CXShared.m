@@ -48,7 +48,10 @@ static id CXFindObject(id root, Class target, int depth, NSMutableSet *seen) {
         Ivar *iv = class_copyIvarList(c, &n);
         for (unsigned i = 0; i < n; i++) {
             const char *t = ivar_getTypeEncoding(iv[i]);
-            if (!t || t[0] != '@') continue;
+            // Идём только по полям с типами из библиотек Control Center (CCS…, CCUI…): так мы не заденем
+            // «висячие» указатели других объектов, которые могли бы уронить SpringBoard.
+            if (!t || t[0] != '@' || t[1] != '"') continue;
+            if (strncmp(t + 2, "CCS", 3) != 0 && strncmp(t + 2, "CCUI", 4) != 0) continue;
             id v = nil;
             @try { v = object_getIvar(root, iv[i]); } @catch (NSException *e) { v = nil; }
             if (!v) continue;
@@ -140,7 +143,7 @@ static NSString *CXCategoryFor(NSString *k) {
     if (CXHas(k, @[@"display", @"brightness", @"audio", @"volume", @"mirror", @"orientation", @"darkmode",
                    @"nightshift", @"truetone", @"textsize", @"mute", @"silence"])) return @"Экран и звук";
     if (CXHas(k, @[@"focus", @"donotdisturb", @"lowpower", @"battery"])) return @"Фокус и питание";
-    if (CXHas(k, @[@"nowplaying", @"media", @"music", @"remote"])) return @"Медиа";
+    if (CXHas(k, @[@"nowplaying", @"media", @"music", @"tvremote"])) return @"Медиа";
     if (CXHas(k, @[@"hearing", @"accessib", @"guided"])) return @"Универсальный доступ";
     if (CXHas(k, @[@"home"])) return @"Дом";
     return @"Другое";
@@ -172,7 +175,7 @@ static NSString *CXIconFor(NSString *k) {
         @[@"nfc", @"wave.3.right"], @[@"barcode", @"qrcode.viewfinder"],
         @[@"hearing", @"ear"], @[@"home", @"house.fill"], @[@"textsize", @"textformat.size"],
         @[@"darkmode", @"circle.lefthalf.filled"], @[@"accessib", @"person.circle.fill"],
-        @[@"guided", @"lock.circle.fill"], @[@"remote", @"tv.fill"],
+        @[@"guided", @"lock.circle.fill"], @[@"tvremote", @"tv.fill"],
         @[@"note", @"note.text"], @[@"wallet", @"creditcard.fill"],
     ];
     for (NSArray *pair in map) if ([k containsString:pair[0]]) return pair[1];
@@ -199,11 +202,46 @@ static UIColor *CXColorFor(NSString *k) {
         @[@"silence", @0xFF453A], @[@"mute", @0xFF453A],
         @[@"nfc", @0x30B0C7], @[@"barcode", @0x636366],
         @[@"hearing", @0x0A84FF], @[@"accessib", @0x0A84FF], @[@"textsize", @0x0A84FF],
-        @[@"darkmode", @0x636366], @[@"guided", @0x0A84FF], @[@"remote", @0x636366],
+        @[@"darkmode", @0x636366], @[@"guided", @0x0A84FF], @[@"tvremote", @0x636366],
         @[@"note", @0xFFD60A], @[@"wallet", @0x30D158], @[@"nowplaying", @0xFF375F],
     ];
     for (NSArray *pair in map) if ([k containsString:pair[0]]) return CXRGB([pair[1] integerValue]);
     return CXRGB(0x48484A);
+}
+
+// Стандартные модули iOS 15: точное название, размер на сетке (колонки × ряды) и вид плитки
+static NSDictionary *CXKnown(NSString *ident) {
+    static NSDictionary *map = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{
+            @"com.apple.control-center.connectivitymodule": @{ @"ru": @"Связь", @"en": @"Connectivity", @"cs": @2, @"rs": @2, @"kind": @"connectivity", @"icon": @"wifi" },
+            @"com.apple.mediaremote.controlcenter.nowplaying": @{ @"ru": @"Музыка", @"en": @"Now Playing", @"cs": @2, @"rs": @2, @"kind": @"nowplaying", @"icon": @"play.fill" },
+            @"com.apple.control-center.displaymodule": @{ @"ru": @"Яркость", @"en": @"Brightness", @"cs": @1, @"rs": @2, @"kind": @"slider-display", @"icon": @"sun.max.fill" },
+            @"com.apple.mediaremote.controlcenter.audio": @{ @"ru": @"Громкость", @"en": @"Volume", @"cs": @1, @"rs": @2, @"kind": @"slider-audio", @"icon": @"speaker.wave.2.fill" },
+            @"com.apple.focusuimodule": @{ @"ru": @"Фокусирование", @"en": @"Focus", @"cs": @2, @"rs": @1, @"kind": @"focus", @"icon": @"moon.fill" },
+            @"com.apple.donotdisturb.donotdisturbmodule": @{ @"ru": @"Не беспокоить", @"en": @"Do Not Disturb", @"cs": @2, @"rs": @1, @"kind": @"focus", @"icon": @"moon.fill" },
+            @"com.apple.control-center.orientationlockmodule": @{ @"ru": @"Блокировка ориентации", @"en": @"Orientation Lock", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"lock.rotation" },
+            @"com.apple.mediaremote.controlcenter.airplaymirroring": @{ @"ru": @"Повтор экрана", @"en": @"Screen Mirroring", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"rectangle.on.rectangle" },
+            @"com.apple.home.controlcenter": @{ @"ru": @"Дом", @"en": @"Home", @"cs": @2, @"rs": @2, @"kind": @"icon", @"icon": @"house.fill" },
+            @"com.apple.control-center.flashlightmodule": @{ @"ru": @"Фонарик", @"en": @"Flashlight", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"flashlight.on.fill" },
+            @"com.apple.control-center.cameramodule": @{ @"ru": @"Камера", @"en": @"Camera", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"camera.fill" },
+            @"com.apple.control-center.calculatormodule": @{ @"ru": @"Калькулятор", @"en": @"Calculator", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"plus.slash.minus" },
+            @"com.apple.control-center.lowpowermodule": @{ @"ru": @"Эконом. режим", @"en": @"Low Power", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"battery.25" },
+            @"com.apple.control-center.voicememosmodule": @{ @"ru": @"Диктофон", @"en": @"Voice Memos", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"waveform.circle.fill" },
+            @"com.apple.control-center.mutemodule": @{ @"ru": @"Без звука", @"en": @"Silent Mode", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"bell.slash.fill" },
+            @"com.apple.mobiletimer.controlcenter.timer": @{ @"ru": @"Таймер", @"en": @"Timer", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"timer" },
+            @"com.apple.mobiletimer.controlcenter.stopwatch": @{ @"ru": @"Секундомер", @"en": @"Stopwatch", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"stopwatch.fill" },
+            @"com.apple.mobiletimer.controlcenter.alarm": @{ @"ru": @"Будильник", @"en": @"Alarm", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"alarm.fill" },
+            @"com.apple.sleep.controlcenter.sleepmode": @{ @"ru": @"Режим сна", @"en": @"Sleep Mode", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"bed.double.fill" },
+            @"com.apple.replaykit.controlcenter.screencapture": @{ @"ru": @"Запись экрана", @"en": @"Screen Recording", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"record.circle" },
+            @"com.apple.replaykit.videoconferencecontrolcentermodule": @{ @"ru": @"Эффекты видео", @"en": @"Video Effects", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"camera.filters" },
+            @"com.apple.replaykit.audioconferencecontrolcentermodule": @{ @"ru": @"Режим микрофона", @"en": @"Mic Mode", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"mic.fill" },
+            @"com.apple.telephonyutilities.silencecallsccwidget": @{ @"ru": @"Заглушить звонки", @"en": @"Silence Calls", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"phone.down.fill" },
+            @"com.apple.barcodesupport.nfccontrolcentermodule": @{ @"ru": @"Метки NFC", @"en": @"NFC Tag Reader", @"cs": @1, @"rs": @1, @"kind": @"icon", @"icon": @"wave.3.right" },
+        };
+    });
+    return map[ident.lowercaseString];
 }
 
 static NSString *CXRussianName(NSString *k) {
@@ -218,7 +256,7 @@ static NSString *CXRussianName(NSString *k) {
         @[@"silence", @"Заглушить звонки"], @[@"mute", @"Без звука"],
         @[@"nfc", @"Метки NFC"], @[@"barcode", @"Сканер кодов"],
         @[@"hearing", @"Слух"], @[@"home", @"Дом"], @[@"textsize", @"Размер текста"],
-        @[@"darkmode", @"Тёмный режим"], @[@"guided", @"Гид-доступ"], @[@"remote", @"Пульт Apple TV"],
+        @[@"darkmode", @"Тёмный режим"], @[@"guided", @"Гид-доступ"], @[@"tvremote", @"Пульт Apple TV"],
         @[@"note", @"Заметки"], @[@"wallet", @"Wallet"],
     ];
     for (NSArray *pair in map) if ([k containsString:pair[0]]) return pair[1];
@@ -247,6 +285,8 @@ NSString *CXCategoryTitle(NSString *key) {
 }
 
 NSString *CXModuleDisplayName(NSString *ident) {
+    NSDictionary *kn = CXKnown(ident);
+    if (kn) return CXL(kn[@"ru"], kn[@"en"]);
     NSString *key = CXKey(ident);
     return (CXIsRussian() ? CXRussianName(key) : nil) ?: CXShortID(ident);
 }
@@ -324,11 +364,6 @@ NSArray<NSDictionary *> *CXAvailableModules(void) {
     }
     if (ids.count == 0) ids = bundleNames.allKeys;   // запасной вариант
 
-    // 3. Фиксированные модули (Связь, Яркость и т.п.) добавлять нельзя
-    id prov = CXNewProvider();
-    NSArray *fixed = CXProvList(prov, @"orderedFixedModuleIdentifiers");
-    NSArray *userFixed = CXProvList(prov, @"orderedUserEnabledFixedModuleIdentifiers");
-
     NSMutableArray *result = [NSMutableArray new];
     NSMutableSet *seen = [NSMutableSet new];
     for (id obj in ids) {
@@ -336,13 +371,16 @@ NSArray<NSDictionary *> *CXAvailableModules(void) {
         NSString *ident = obj;
         if ([seen containsObject:ident]) continue;
         [seen addObject:ident];
-        if ([fixed containsObject:ident] && ![userFixed containsObject:ident]) continue;
 
         NSString *key = CXKey(ident);
-        NSString *name = (CXIsRussian() ? CXRussianName(key) : nil) ?: bundleNames[ident] ?: CXShortID(ident);
+        NSDictionary *kn = CXKnown(ident);
+        NSString *name = kn ? CXL(kn[@"ru"], kn[@"en"])
+                            : ((CXIsRussian() ? CXRussianName(key) : nil) ?: bundleNames[ident] ?: CXShortID(ident));
         [result addObject:@{ @"id": ident, @"name": name,
-                             @"category": CXCategoryFor(key), @"icon": CXIconFor(key),
-                             @"color": CXColorFor(key) }];
+                             @"category": CXCategoryFor(key), @"icon": kn[@"icon"] ?: CXIconFor(key),
+                             @"color": CXColorFor(key),
+                             @"cs": kn[@"cs"] ?: @1, @"rs": kn[@"rs"] ?: @1,
+                             @"kind": kn[@"kind"] ?: @"icon" }];
     }
     NSSortDescriptor *sd = [NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
                                                          selector:@selector(localizedCaseInsensitiveCompare:)];
@@ -381,6 +419,16 @@ static void CXEnableVisibility(NSString *ident) {
     SEL vis = NSSelectorFromString(@"visibilityForModuleIdentifier:");
     SEL setVis = NSSelectorFromString(@"setVisibility:forModuleIdentifier:");
     if (!repo || ![repo respondsToSelector:vis] || ![repo respondsToSelector:setVis]) return;
+
+    // Вызываем только если сигнатуры именно такие, как мы ожидаем (число + идентификатор): иначе можно уронить SpringBoard
+    NSMethodSignature *gs = [repo methodSignatureForSelector:vis];
+    NSMethodSignature *ss = [repo methodSignatureForSelector:setVis];
+    if (!gs || !ss || gs.numberOfArguments != 3 || ss.numberOfArguments != 4) return;
+    const char *grt = gs.methodReturnType;
+    const char *a2 = [ss getArgumentTypeAtIndex:2];
+    const char *a3 = [ss getArgumentTypeAtIndex:3];
+    const char *ints = "QqBcCiIsSlL";
+    if (!grt || !a2 || !a3 || a3[0] != '@' || !strchr(ints, a2[0]) || !strchr(ints, grt[0])) return;
 
     // Какое значение означает «включён»: смотрим на модуль, который сейчас точно включён
     NSArray *enabled = CXProvList(prov, @"orderedUserEnabledModuleIdentifiers");
@@ -502,4 +550,17 @@ void CXPlanApplyPersist(void) {
     for (NSString *r in [gPlanRemove array]) CXApplyRemove(r);
     for (NSString *a in [gPlanAdd array]) CXApplyAdd(a);
     if (gPlanOrder.count) CXApplyOrder(gPlanOrder);
+}
+
+// ---------- Модули, которые нельзя отфильтровывать ----------
+
+static NSSet<NSString *> *gForcedIDs = nil;
+static NSString *const kForcedLock = @"cx.forced.lock";
+
+void CXSetForcedIDs(NSSet<NSString *> *ids) {
+    @synchronized(kForcedLock) { gForcedIDs = [ids copy]; }
+}
+
+NSSet<NSString *> *CXForcedIDs(void) {
+    @synchronized(kForcedLock) { return gForcedIDs ?: [NSSet set]; }
 }

@@ -251,8 +251,18 @@ static BOOL CXIsShown(NSString *ident) {
 // Добавленные модули, появление которых проверяем после «перезахода» (не все модули есть на любом устройстве)
 static NSArray<NSString *> *gVerifyAdded = nil;
 
+// Метод принимает BOOL (и ровно столько аргументов, сколько ожидаем)
+static BOOL CXTakesBoolArg(id obj, SEL sel, NSUInteger argCount) {
+    if (![obj respondsToSelector:sel]) return NO;
+    NSMethodSignature *sig = [obj methodSignatureForSelector:sel];
+    if (!sig || sig.numberOfArguments != argCount) return NO;
+    const char *t = [sig getArgumentTypeAtIndex:2];
+    return t && (t[0] == 'B' || t[0] == 'c');
+}
+
 // «Перезаход» в Control Center: закрываем и открываем заново, чтобы он перечитал настройки и
-// заново разложил модули. Возвращает NO, если системный контроллер недоступен.
+// заново разложил модули. Системные методы вызываем только после проверки их сигнатур.
+// Возвращает NO, если системный контроллер недоступен.
 static BOOL CXReopenControlCenter(void) {
     Class c = NSClassFromString(@"SBControlCenterController");
     SEL sh = NSSelectorFromString(@"sharedInstance");
@@ -264,27 +274,26 @@ static BOOL CXReopenControlCenter(void) {
     SEL dis2 = NSSelectorFromString(@"dismissAnimated:completion:");
     SEL pre1 = NSSelectorFromString(@"presentAnimated:");
     SEL pre2 = NSSelectorFromString(@"presentAnimated:completion:");
-    BOOL canDismiss = [sc respondsToSelector:dis1] || [sc respondsToSelector:dis2];
-    BOOL canPresent = [sc respondsToSelector:pre1] || [sc respondsToSelector:pre2];
-    if (!canDismiss) return NO;
+    BOOL d1 = CXTakesBoolArg(sc, dis1, 3), d2 = CXTakesBoolArg(sc, dis2, 4);
+    BOOL p1 = CXTakesBoolArg(sc, pre1, 3), p2 = CXTakesBoolArg(sc, pre2, 4);
+    if (!d1 && !d2) return NO;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            if ([sc respondsToSelector:dis1]) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, dis1, YES);
+            if (d1) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, dis1, YES);
             else ((void (*)(id, SEL, BOOL, id))objc_msgSend)(sc, dis2, YES, nil);
         } @catch (NSException *e) {}
     });
-    if (canPresent) {
+    if (p1 || p2) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             @try {
-                if ([sc respondsToSelector:pre1]) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, pre1, YES);
+                if (p1) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, pre1, YES);
                 else ((void (*)(id, SEL, BOOL, id))objc_msgSend)(sc, pre2, YES, nil);
             } @catch (NSException *e) {}
         });
     }
     return YES;
 }
-
 static UIScrollView *CXFindScrollView(void) {
     for (UIViewController *o in gContainers.allObjects) {
         if (!o.isViewLoaded) continue;
@@ -881,6 +890,28 @@ static void CXDragEnd(void) {
     if (sv) CXSnapScroll(sv, 0);              // страница мягко встаёт на ближайшую «остановку»
 }
 
+static BOOL CXLooksLikeBlur(UIView *v) {
+    if ([v isKindOfClass:UIVisualEffectView.class]) return YES;
+    NSString *cn = NSStringFromClass(v.class);
+    return [cn containsString:@"Material"] || [cn containsString:@"Blur"] || [cn containsString:@"BackdropView"];
+}
+
+static void CXHideTopBlurIn(UIView *root, UIWindow *w, int depth) {
+    if (depth > 10) return;
+    for (UIView *s in root.subviews) {
+        if (s == gHost || [s isKindOfClass:CXPassView.class]) continue;
+        if (CXLooksLikeBlur(s) && !s.hidden) {
+            CGRect r = [s convertRect:s.bounds toView:w];
+            CGSize sc = w.bounds.size;
+            if (r.origin.y < 8 && r.size.height > 20 && r.size.height < sc.height * 0.45 && r.size.width > sc.width * 0.8) {
+                s.hidden = YES;
+                s.alpha = 0;
+            }
+        }
+        CXHideTopBlurIn(s, w, depth + 1);
+    }
+}
+
 // ---------- Оверлей Control Center: долгий тап, «+», «Готово / Применить», «Отмена» ----------
 
 %hook CCUIModularControlCenterOverlayViewController
@@ -910,6 +941,7 @@ static void CXDragEnd(void) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     [self cx_forceResetEditing];     // каждое открытие Control Center начинается без «залипшего» состояния
+    CXSetForcedIDs(CXCurrentEnabledIDs());
 
     // Проверяем, появились ли добавленные модули. Если нет (например, «Режим сна» на устройстве без нужных
     // возможностей), честно сообщаем и убираем их из настроек, чтобы не оставались «призраками».
@@ -991,6 +1023,15 @@ static void CXDragEnd(void) {
     if (!gEditing) {
         // Обычный режим: родная прокрутка Control Center без нашего вмешательства, только точки справа
         CXNaturalDots(sv);
+
+        // Раз в секунду убираем размытую полосу у верхнего края
+        static CFTimeInterval lastBlurScan = 0;
+        CFTimeInterval nowT = CACurrentMediaTime();
+        if (nowT - lastBlurScan > 1.0) {
+            lastBlurScan = nowT;
+            UIWindow *w = self.view.window;
+            if (w) CXHideTopBlurIn(w, w, 0);
+        }
         return;
     }
 
@@ -1217,6 +1258,11 @@ static void CXDragEnd(void) {
 
     // Записываем в настройки и «перезаходим» в Control Center: он заново разложит модули в новом порядке.
     gVerifyAdded = [CXPlanAddedList() copy];
+    {
+        NSMutableSet<NSString *> *forced = [CXCurrentEnabledIDs() mutableCopy];
+        [forced addObjectsFromArray:CXPlanAddedList()];
+        CXSetForcedIDs(forced);
+    }
     CXPlanApplyPersist();
     CXPlanClear();
     BOOL reopened = CXReopenControlCenter();
@@ -1516,7 +1562,7 @@ static id CXRestoreFiltered(id input, id output) {
     NSMutableSet<NSString *> *have = [NSMutableSet new];
     for (id o in outArr) { NSString *i = CXMetaID(o); if (i) [have addObject:i]; }
 
-    NSSet<NSString *> *wanted = CXCurrentEnabledIDs();
+    NSSet<NSString *> *wanted = CXForcedIDs();       // готовый список (хук вызывается не на главном потоке)
     NSMutableArray *extra = [NSMutableArray new];
     for (id o in inArr) {
         NSString *i = CXMetaID(o);
@@ -1549,13 +1595,17 @@ static id CXRestoreFiltered(id input, id output) {
 %end
 
 // ---------- Без «блюра» сверху в Control Center ----------
+//
+// В iOS 15 размытие рисуют не UIVisualEffectView, а MTMaterialView (MaterialKit). Поэтому ищем по названию класса.
+// Прячем только широкую полосу у верхнего края (не весь фон и не сами модули).
 
 %hook CCUIHeaderPocketView
 
 - (void)layoutSubviews {
     %orig;
+    self.backgroundColor = UIColor.clearColor;
     for (UIView *sub in self.subviews) {
-        if ([sub isKindOfClass:UIVisualEffectView.class]) { sub.hidden = YES; sub.alpha = 0; }
+        if (CXLooksLikeBlur(sub)) { sub.hidden = YES; sub.alpha = 0; }
     }
 }
 
@@ -1571,10 +1621,12 @@ static id CXRestoreFiltered(id input, id output) {
     Method m2 = repo ? class_getInstanceMethod(repo, s2) : NULL;
     BOOL ok = NO;
     if (m1 && m2) {
-        const char *e1 = method_getTypeEncoding(m1);
-        const char *e2 = method_getTypeEncoding(m2);
-        // возвращают объект и принимают один объект
-        ok = (e1 && e2 && e1[0] == '@' && e2[0] == '@');
+        // Хук ставим только если оба метода возвращают объект и принимают ровно один объект
+        char *r1 = method_copyReturnType(m1), *r2 = method_copyReturnType(m2);
+        char *a1 = method_copyArgumentType(m1, 2), *a2 = method_copyArgumentType(m2, 2);
+        ok = (r1 && r2 && a1 && a2 && r1[0] == '@' && r2[0] == '@' && a1[0] == '@' && a2[0] == '@' &&
+              method_getNumberOfArguments(m1) == 3 && method_getNumberOfArguments(m2) == 3);
+        free(r1); free(r2); free(a1); free(a2);
     }
     if (ok) { %init(FilterFix); }
 }

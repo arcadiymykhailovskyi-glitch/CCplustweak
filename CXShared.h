@@ -46,3 +46,7 @@ NSString *CXCategoryTitle(NSString *key);
 NSString *CXModuleDisplayName(NSString *ident);
 // Убирает модули из настроек (например, те, что не поддерживаются этим устройством)
 void CXForgetModules(NSArray<NSString *> *ids);
+
+// Модули, которые пользователь включил: репозиторию Control Center нельзя их «отфильтровывать»
+void CXSetForcedIDs(NSSet<NSString *> *ids);
+NSSet<NSString *> *CXForcedIDs(void);

@@ -1,39 +1,46 @@
 #import "CXPickerController.h"
 #import "CXShared.h"
 
-// ---------- Ячейка-плитка ----------
+// ---------- Ячейка-плитка: рисуем модуль «1 в 1» ----------
+//
+// Плитка выглядит как сам модуль в Control Center: тёмный скруглённый квадрат с белым значком,
+// высокий ползунок для яркости и громкости, большой квадрат с четырьмя кружками для «Связи»,
+// широкая плитка «Фокусирование» и «Музыка» с кнопками управления. Размер плитки равен размеру модуля на сетке.
 
 @interface CXTileCell : UICollectionViewCell
 @property (nonatomic, strong) UIView *box;
-@property (nonatomic, strong) UIImageView *icon;
+@property (nonatomic, strong) UIView *art;
 @property (nonatomic, strong) UILabel *label;
 @property (nonatomic, strong) UIImageView *check;
-@property (nonatomic, strong) CAGradientLayer *shine;
+@property (nonatomic, copy) NSString *kind;
+@property (nonatomic, copy) NSString *symbol;
+@property (nonatomic, assign) CGSize builtSize;
+@property (nonatomic, copy) NSString *builtKind;
+@property (nonatomic, copy) NSString *builtSymbol;
 @end
+
+static UIImageView *CXGlyph(NSString *name, CGFloat pt, UIColor *tint) {
+    UIImageView *v = [UIImageView new];
+    v.contentMode = UIViewContentModeCenter;
+    v.tintColor = tint;
+    v.preferredSymbolConfiguration =
+        [UIImageSymbolConfiguration configurationWithPointSize:pt weight:UIImageSymbolWeightSemibold];
+    v.image = [UIImage systemImageNamed:name] ?: [UIImage systemImageNamed:@"square.grid.2x2.fill"];
+    return v;
+}
 
 @implementation CXTileCell
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         _box = [UIView new];
-        _box.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
-        _box.layer.cornerRadius = 17;
+        _box.backgroundColor = [UIColor colorWithWhite:0.30 alpha:0.92];
+        _box.layer.cornerRadius = 20;
         _box.layer.cornerCurve = kCACornerCurveContinuous;
         _box.clipsToBounds = YES;
 
-        // Лёгкий блик сверху, как у системных значков
-        CAGradientLayer *shine = [CAGradientLayer layer];
-        shine.colors = @[(id)[UIColor colorWithWhite:1.0 alpha:0.26].CGColor, (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor];
-        shine.startPoint = CGPointMake(0.5, 0.0);
-        shine.endPoint = CGPointMake(0.5, 0.75);
-        [_box.layer addSublayer:shine];
-        _shine = shine;
-
-        _icon = [UIImageView new];
-        _icon.contentMode = UIViewContentModeCenter;
-        _icon.tintColor = UIColor.whiteColor;
-        _icon.preferredSymbolConfiguration =
-            [UIImageSymbolConfiguration configurationWithPointSize:29 weight:UIImageSymbolWeightSemibold];
+        _art = [UIView new];
+        [_box addSubview:_art];
 
         _label = [UILabel new];
         _label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
@@ -50,7 +57,6 @@
         _check.hidden = YES;
 
         [self.contentView addSubview:_box];
-        [_box addSubview:_icon];
         [self.contentView addSubview:_label];
         [self.contentView addSubview:_check];
     }
@@ -60,15 +66,101 @@
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat w = self.contentView.bounds.size.width;
-    CGFloat s = MIN(w, 64);
-    self.box.frame = CGRectMake((w - s) / 2, 0, s, s);
-    self.icon.frame = self.box.bounds;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    self.shine.frame = self.box.bounds;
-    [CATransaction commit];
-    self.check.frame = CGRectMake(CGRectGetMaxX(self.box.frame) - 14, -5, 22, 22);
-    self.label.frame = CGRectMake(0, s + 6, w, 30);
+    CGFloat h = self.contentView.bounds.size.height;
+    CGFloat boxH = MAX(20, h - 36);
+    self.box.frame = CGRectMake(0, 0, w, boxH);
+    self.art.frame = self.box.bounds;
+    self.label.frame = CGRectMake(0, boxH + 6, w, 30);
+    self.check.frame = CGRectMake(w - 16, -5, 22, 22);
+
+    BOOL same = CGSizeEqualToSize(self.builtSize, self.box.bounds.size) &&
+                [self.builtKind isEqualToString:self.kind ?: @""] &&
+                [self.builtSymbol isEqualToString:self.symbol ?: @""];
+    if (!same) [self rebuildArt];
+}
+
+- (void)rebuildArt {
+    self.builtSize = self.box.bounds.size;
+    self.builtKind = self.kind ?: @"";
+    self.builtSymbol = self.symbol ?: @"";
+    for (UIView *v in [self.art.subviews copy]) [v removeFromSuperview];
+
+    CGFloat W = self.art.bounds.size.width, H = self.art.bounds.size.height;
+    UIColor *white = UIColor.whiteColor;
+
+    if ([self.kind hasPrefix:@"slider"]) {
+        BOOL sun = [self.kind isEqualToString:@"slider-display"];
+        UIView *fill = [[UIView alloc] initWithFrame:CGRectMake(0, H * 0.40, W, H * 0.60)];
+        fill.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.96];
+        [self.art addSubview:fill];
+        UIImageView *g = CXGlyph(sun ? @"sun.max.fill" : @"speaker.wave.2.fill", MIN(W * 0.42, 28),
+                                 [UIColor colorWithWhite:0.45 alpha:1.0]);
+        g.frame = CGRectMake(0, H - W * 0.95, W, W * 0.6);
+        [self.art addSubview:g];
+        return;
+    }
+
+    if ([self.kind isEqualToString:@"connectivity"]) {
+        CGFloat d = W * 0.38, gap = (W - 2 * d) / 3.0;
+        NSArray *names = @[@"airplane", @"antenna.radiowaves.left.and.right", @"wifi", @"dot.radiowaves.left.and.right"];
+        UIColor *dark = [UIColor colorWithWhite:0.16 alpha:0.9];
+        UIColor *blue = [UIColor colorWithRed:0.04 green:0.52 blue:1.0 alpha:1.0];
+        NSArray *colors = @[dark, dark, blue, blue];
+        for (int i = 0; i < 4; i++) {
+            UIView *c = [[UIView alloc] initWithFrame:CGRectMake(gap + (i % 2) * (d + gap), gap + (i / 2) * (d + gap), d, d)];
+            c.backgroundColor = colors[i];
+            c.layer.cornerRadius = d / 2;
+            UIImageView *g = CXGlyph(names[i], d * 0.46, white);
+            g.frame = c.bounds;
+            [c addSubview:g];
+            [self.art addSubview:c];
+        }
+        return;
+    }
+
+    if ([self.kind isEqualToString:@"nowplaying"]) {
+        UILabel *t = [UILabel new];
+        t.text = CXL(@"Не исполняется", @"Not Playing");
+        t.font = [UIFont systemFontOfSize:MAX(10, W * 0.10) weight:UIFontWeightSemibold];
+        t.textColor = white;
+        t.adjustsFontSizeToFitWidth = YES;
+        t.minimumScaleFactor = 0.7;
+        t.frame = CGRectMake(W * 0.10, H * 0.12, W * 0.80, 22);
+        [self.art addSubview:t];
+        NSArray *names = @[@"backward.fill", @"play.fill", @"forward.fill"];
+        CGFloat cw = W * 0.76 / 3.0;
+        for (int i = 0; i < 3; i++) {
+            UIImageView *g = CXGlyph(names[i], i == 1 ? W * 0.17 : W * 0.12, white);
+            g.frame = CGRectMake(W * 0.12 + i * cw, H * 0.60, cw, H * 0.26);
+            [self.art addSubview:g];
+        }
+        return;
+    }
+
+    if ([self.kind isEqualToString:@"focus"]) {
+        CGFloat d = MIN(H * 0.62, 36);
+        UIView *c = [[UIView alloc] initWithFrame:CGRectMake(H * 0.18, (H - d) / 2.0, d, d)];
+        c.backgroundColor = [UIColor colorWithRed:0.37 green:0.36 blue:0.90 alpha:1.0];
+        c.layer.cornerRadius = d / 2;
+        UIImageView *g = CXGlyph(@"moon.fill", d * 0.5, white);
+        g.frame = c.bounds;
+        [c addSubview:g];
+        [self.art addSubview:c];
+        UILabel *t = [UILabel new];
+        t.text = CXL(@"Фокусирование", @"Focus");
+        t.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        t.textColor = white;
+        t.adjustsFontSizeToFitWidth = YES;
+        t.minimumScaleFactor = 0.7;
+        t.frame = CGRectMake(CGRectGetMaxX(c.frame) + 6, 0, W - CGRectGetMaxX(c.frame) - 10, H);
+        [self.art addSubview:t];
+        return;
+    }
+
+    // Обычный модуль: тёмная плитка с белым значком посередине
+    UIImageView *g = CXGlyph(self.symbol ?: @"square.grid.2x2.fill", MIN(W * 0.40, 30), white);
+    g.frame = self.art.bounds;
+    [self.art addSubview:g];
 }
 
 @end
@@ -344,9 +436,20 @@
 }
 
 - (CGSize)collectionView:(UICollectionView *)cv layout:(UICollectionViewLayout *)l sizeForItemAtIndexPath:(NSIndexPath *)ip {
+    NSDictionary *m = [self moduleAt:ip];
     CGFloat avail = cv.bounds.size.width - 32;
-    CGFloat w = floor((avail - 3 * 6) / 4);
-    return CGSizeMake(w, 64 + 6 + 30);
+    CGFloat gap = 6;
+    CGFloat u = floor((avail - 3 * gap) / 4);          // ширина одной «клетки» сетки
+    CGFloat uh = floor(u * 0.92);                        // высота одной «клетки»
+    NSInteger cs = [m[@"cs"] integerValue];
+    NSInteger rs = [m[@"rs"] integerValue];
+    if (cs < 1) cs = 1;
+    if (rs < 1) rs = 1;
+    cs = MIN(cs, 4);
+    rs = MIN(rs, 3);
+    CGFloat w = cs * u + (cs - 1) * gap;
+    CGFloat boxH = rs * uh + (rs - 1) * gap;
+    return CGSizeMake(w, boxH + 36);
 }
 
 - (UICollectionReusableView *)collectionView:(UICollectionView *)cv
@@ -367,15 +470,16 @@
     BOOL planned = CXPlanIsAdded(ident);
     BOOL already = [self.enabled containsObject:ident] && !CXPlanIsRemoved(ident);
 
+    c.kind = m[@"kind"] ?: @"icon";
+    c.symbol = m[@"icon"];
     c.label.text = m[@"name"];
-    c.icon.image = [UIImage systemImageNamed:m[@"icon"]] ?: [UIImage systemImageNamed:@"square.grid.2x2.fill"];
     c.check.hidden = !(planned || already);
     c.check.tintColor = planned ? [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0]
-                                : [UIColor colorWithWhite:1.0 alpha:0.55];
-    c.box.alpha = (already && !planned) ? 0.4 : 1.0;
-    c.box.backgroundColor = m[@"color"] ?: [UIColor colorWithWhite:0.28 alpha:1.0];
+                                : [UIColor colorWithWhite:1.0 alpha:0.7];
+    c.box.alpha = (already && !planned) ? 0.45 : 1.0;
     c.box.layer.borderWidth = planned ? 2.5 : 0;
     c.box.layer.borderColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0].CGColor;
+    [c setNeedsLayout];
     return c;
 }
 
