@@ -28,6 +28,8 @@ static NSInteger gDotsCount = 0, gDotsCurrent = -1;
 static NSArray<NSNumber *> *gPageCache = nil;
 static CFTimeInterval gPageCacheT = 0;
 static CGFloat gPageTop = 70;                 // сколько места сверху оставлено на странице
+static BOOL gKeepLayout = NO;                   // после «Применить» оставляем перестроенную сетку до закрытия Control Center
+static NSSet<NSString *> *gAppliedRemoved = nil;   // какие модули убраны при применении
 static NSString *gSelected = nil;             // модуль, который сейчас «выбран» (обводится белым)
 
 // Слой редактирования поверх каждого модуля: только рисует значок «−», касания не принимает
@@ -251,49 +253,6 @@ static BOOL CXIsShown(NSString *ident) {
 // Добавленные модули, появление которых проверяем после «перезахода» (не все модули есть на любом устройстве)
 static NSArray<NSString *> *gVerifyAdded = nil;
 
-// Метод принимает BOOL (и ровно столько аргументов, сколько ожидаем)
-static BOOL CXTakesBoolArg(id obj, SEL sel, NSUInteger argCount) {
-    if (![obj respondsToSelector:sel]) return NO;
-    NSMethodSignature *sig = [obj methodSignatureForSelector:sel];
-    if (!sig || sig.numberOfArguments != argCount) return NO;
-    const char *t = [sig getArgumentTypeAtIndex:2];
-    return t && (t[0] == 'B' || t[0] == 'c');
-}
-
-// «Перезаход» в Control Center: закрываем и открываем заново, чтобы он перечитал настройки и
-// заново разложил модули. Системные методы вызываем только после проверки их сигнатур.
-// Возвращает NO, если системный контроллер недоступен.
-static BOOL CXReopenControlCenter(void) {
-    Class c = NSClassFromString(@"SBControlCenterController");
-    SEL sh = NSSelectorFromString(@"sharedInstance");
-    if (!c || ![c respondsToSelector:sh]) return NO;
-    id sc = ((id (*)(id, SEL))objc_msgSend)(c, sh);
-    if (!sc) return NO;
-
-    SEL dis1 = NSSelectorFromString(@"dismissAnimated:");
-    SEL dis2 = NSSelectorFromString(@"dismissAnimated:completion:");
-    SEL pre1 = NSSelectorFromString(@"presentAnimated:");
-    SEL pre2 = NSSelectorFromString(@"presentAnimated:completion:");
-    BOOL d1 = CXTakesBoolArg(sc, dis1, 3), d2 = CXTakesBoolArg(sc, dis2, 4);
-    BOOL p1 = CXTakesBoolArg(sc, pre1, 3), p2 = CXTakesBoolArg(sc, pre2, 4);
-    if (!d1 && !d2) return NO;
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        @try {
-            if (d1) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, dis1, YES);
-            else ((void (*)(id, SEL, BOOL, id))objc_msgSend)(sc, dis2, YES, nil);
-        } @catch (NSException *e) {}
-    });
-    if (p1 || p2) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            @try {
-                if (p1) ((void (*)(id, SEL, BOOL))objc_msgSend)(sc, pre1, YES);
-                else ((void (*)(id, SEL, BOOL, id))objc_msgSend)(sc, pre2, YES, nil);
-            } @catch (NSException *e) {}
-        });
-    }
-    return YES;
-}
 static UIScrollView *CXFindScrollView(void) {
     for (UIViewController *o in gContainers.allObjects) {
         if (!o.isViewLoaded) continue;
@@ -890,6 +849,47 @@ static void CXDragEnd(void) {
     if (sv) CXSnapScroll(sv, 0);              // страница мягко встаёт на ближайшую «остановку»
 }
 
+// После «Применить» Control Center не закрываем и не перезапускаем. Сетку на экране перестраиваем сами:
+// убранные модули гаснут, остальные плавно занимают освободившиеся места (как это сделает Control Center
+// при следующем открытии по сохранённым настройкам).
+static void CXReflowAfterApply(NSArray<NSString *> *removed) {
+    if (!CXBuildGrid()) return;
+    NSMutableArray<NSString *> *order = [NSMutableArray new];
+    for (NSString *i in gOrder) if (![removed containsObject:i]) [order addObject:i];
+    NSMutableDictionary<NSString *, NSValue *> *dest = CXSimulate(order);
+
+    for (NSString *oid in order) {
+        NSDictionary *oi = gInfo[oid];
+        NSValue *dv = dest[oid];
+        if (!oi || !dv) continue;
+        CGPoint base = [oi[@"base"] CGPointValue], d = dv.CGPointValue;
+        UIView *v = ((UIViewController *)oi[@"vc"]).view;
+        [UIView animateWithDuration:0.55 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.2
+                            options:UIViewAnimationOptionAllowUserInteraction
+                         animations:^{ v.transform = CGAffineTransformMakeTranslation(d.x - base.x, d.y - base.y); }
+                         completion:nil];
+    }
+    for (NSString *rid in removed) {
+        UIView *v = ((UIViewController *)gInfo[rid][@"vc"]).view;
+        if (!v) continue;
+        v.userInteractionEnabled = NO;
+        [UIView animateWithDuration:0.3 animations:^{ v.alpha = 0; }];
+    }
+}
+
+// Возвращаем все модули на места (вызывается, когда Control Center закрыт или открыт заново)
+static void CXRestoreAllContainers(void) {
+    for (UIViewController *o in gContainers.allObjects) {
+        if (!o.isViewLoaded) continue;
+        UIView *v = o.view;
+        if (!CGAffineTransformIsIdentity(v.transform)) v.transform = CGAffineTransformIdentity;
+        v.alpha = 1.0;
+        v.userInteractionEnabled = YES;
+    }
+    gKeepLayout = NO;
+    gAppliedRemoved = nil;
+}
+
 static BOOL CXLooksLikeBlur(UIView *v) {
     if ([v isKindOfClass:UIVisualEffectView.class]) return YES;
     NSString *cn = NSStringFromClass(v.class);
@@ -1002,6 +1002,7 @@ static void CXHideTopBlurIn(UIView *root, UIWindow *w, int depth) {
     gShield = nil;
     if (gHost) { [gHost removeFromSuperview]; gHost = nil; }
     CXSuspendCCGestures(nil, NO);
+    if (gKeepLayout) CXRestoreAllContainers();
     BOOL wasEditing = gEditing;
     gEditing = NO;
     if (CXPlanHasChanges()) CXPlanClear();
@@ -1256,26 +1257,27 @@ static void CXHideTopBlurIn(UIView *root, UIWindow *w, int depth) {
         [done layoutIfNeeded];
     }];
 
-    // Записываем в настройки и «перезаходим» в Control Center: он заново разложит модули в новом порядке.
-    gVerifyAdded = [CXPlanAddedList() copy];
+    // Записываем настройки. Control Center при этом НЕ закрываем и не перезапускаем: сетку на экране
+    // перестраиваем сами, а Control Center подхватит сохранённые настройки при следующем открытии.
+    NSArray<NSString *> *removed = CXPlanRemovedList();
+    NSArray<NSString *> *added = CXPlanAddedList();
+    gVerifyAdded = [added copy];
     {
         NSMutableSet<NSString *> *forced = [CXCurrentEnabledIDs() mutableCopy];
-        [forced addObjectsFromArray:CXPlanAddedList()];
+        [forced addObjectsFromArray:added];
         CXSetForcedIDs(forced);
     }
     CXPlanApplyPersist();
+    CXReflowAfterApply(removed);
+    gKeepLayout = YES;
+    gAppliedRemoved = [NSSet setWithArray:removed];
+    [self cx_setEditing:NO];
     CXPlanClear();
-    BOOL reopened = CXReopenControlCenter();
     CXHaptic();
-
-    if (reopened) {
-        [self cx_setEditing:NO];
-    } else {
-        CXToastFor(CXL(@"Сохранено. Закройте и снова откройте Пункт управления", @"Saved. Close and reopen Control Center"), 2.2);
-        __weak CCUIModularControlCenterOverlayViewController *weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [weakSelf cx_setEditing:NO];
-        });
+    if (added.count) {
+        CXToastInView(self.view.window,
+                      CXL(@"Новые виджеты появятся при следующем открытии Пункта управления",
+                          @"New controls will appear the next time you open Control Center"), 3.0);
     }
 }
 
@@ -1334,10 +1336,16 @@ static void CXHideTopBlurIn(UIView *root, UIWindow *w, int depth) {
         if (ov) {
             [v.layer removeAnimationForKey:@"cx_wobble"];
             [self cx_setSystemGestures:YES];
+            BOOL keep = gKeepLayout;
+            BOOL gone = [gAppliedRemoved containsObject:ident];
             [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
                 ov.alpha = 0;
-                v.alpha = 1;
-                v.transform = CGAffineTransformIdentity;
+                if (keep) {
+                    v.alpha = gone ? 0 : 1;          // после применения оставляем перестроенную сетку
+                } else {
+                    v.alpha = 1;
+                    v.transform = CGAffineTransformIdentity;
+                }
             } completion:^(BOOL f) { [ov removeFromSuperview]; }];
         }
         return;

@@ -12,6 +12,7 @@
 @property (nonatomic, strong) UIView *art;
 @property (nonatomic, strong) UILabel *label;
 @property (nonatomic, strong) UIImageView *check;
+@property (nonatomic, strong) CAGradientLayer *gloss;
 @property (nonatomic, copy) NSString *kind;
 @property (nonatomic, copy) NSString *symbol;
 @property (nonatomic, assign) CGSize builtSize;
@@ -34,16 +35,26 @@ static UIImageView *CXGlyph(NSString *name, CGFloat pt, UIColor *tint) {
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         _box = [UIView new];
-        _box.backgroundColor = [UIColor colorWithWhite:0.30 alpha:0.92];
-        _box.layer.cornerRadius = 20;
+        _box.backgroundColor = UIColor.clearColor;
         _box.layer.cornerCurve = kCACornerCurveContinuous;
         _box.clipsToBounds = YES;
+        _box.layer.borderWidth = 0.5;
+        _box.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+
+        // Фон плитки: тёмное «стекло» с лёгким градиентом, как у модулей Control Center
+        CAGradientLayer *gloss = [CAGradientLayer layer];
+        gloss.colors = @[(id)[UIColor colorWithWhite:0.40 alpha:0.96].CGColor,
+                         (id)[UIColor colorWithWhite:0.24 alpha:0.96].CGColor];
+        gloss.startPoint = CGPointMake(0.5, 0.0);
+        gloss.endPoint = CGPointMake(0.5, 1.0);
+        [_box.layer insertSublayer:gloss atIndex:0];
+        _gloss = gloss;
 
         _art = [UIView new];
         [_box addSubview:_art];
 
         _label = [UILabel new];
-        _label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+        _label.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightSemibold];
         _label.textColor = [UIColor colorWithWhite:1.0 alpha:0.92];
         _label.textAlignment = NSTextAlignmentCenter;
         _label.numberOfLines = 2;
@@ -69,9 +80,14 @@ static UIImageView *CXGlyph(NSString *name, CGFloat pt, UIColor *tint) {
     CGFloat h = self.contentView.bounds.size.height;
     CGFloat boxH = MAX(20, h - 36);
     self.box.frame = CGRectMake(0, 0, w, boxH);
+    self.box.layer.cornerRadius = MIN(w, boxH) * 0.27;          // скругление растёт вместе с плиткой
     self.art.frame = self.box.bounds;
-    self.label.frame = CGRectMake(0, boxH + 6, w, 30);
-    self.check.frame = CGRectMake(w - 16, -5, 22, 22);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.gloss.frame = self.box.bounds;
+    [CATransaction commit];
+    self.label.frame = CGRectMake(0, boxH + 5, w, 28);
+    self.check.frame = CGRectMake(w - 14, -5, 20, 20);
 
     BOOL same = CGSizeEqualToSize(self.builtSize, self.box.bounds.size) &&
                 [self.builtKind isEqualToString:self.kind ?: @""] &&
@@ -93,7 +109,7 @@ static UIImageView *CXGlyph(NSString *name, CGFloat pt, UIColor *tint) {
         UIView *fill = [[UIView alloc] initWithFrame:CGRectMake(0, H * 0.40, W, H * 0.60)];
         fill.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.96];
         [self.art addSubview:fill];
-        UIImageView *g = CXGlyph(sun ? @"sun.max.fill" : @"speaker.wave.2.fill", MIN(W * 0.42, 28),
+        UIImageView *g = CXGlyph(sun ? @"sun.max.fill" : @"speaker.wave.2.fill", MIN(W * 0.42, 22),
                                  [UIColor colorWithWhite:0.45 alpha:1.0]);
         g.frame = CGRectMake(0, H - W * 0.95, W, W * 0.6);
         [self.art addSubview:g];
@@ -158,7 +174,7 @@ static UIImageView *CXGlyph(NSString *name, CGFloat pt, UIColor *tint) {
     }
 
     // Обычный модуль: тёмная плитка с белым значком посередине
-    UIImageView *g = CXGlyph(self.symbol ?: @"square.grid.2x2.fill", MIN(W * 0.40, 30), white);
+    UIImageView *g = CXGlyph(self.symbol ?: @"square.grid.2x2.fill", MIN(W * 0.40, 24), white);
     g.frame = self.art.bounds;
     [self.art addSubview:g];
 }
@@ -439,13 +455,13 @@ static UIImageView *CXGlyph(NSString *name, CGFloat pt, UIColor *tint) {
     NSDictionary *m = [self moduleAt:ip];
     CGFloat avail = cv.bounds.size.width - 32;
     CGFloat gap = 6;
-    CGFloat u = floor((avail - 3 * gap) / 4);          // ширина одной «клетки» сетки
+    CGFloat u = floor((avail - 5 * gap) / 6);          // ширина одной «клетки»: плитки мельче реальных, пропорции те же
     CGFloat uh = floor(u * 0.92);                        // высота одной «клетки»
     NSInteger cs = [m[@"cs"] integerValue];
     NSInteger rs = [m[@"rs"] integerValue];
     if (cs < 1) cs = 1;
     if (rs < 1) rs = 1;
-    cs = MIN(cs, 4);
+    cs = MIN(cs, 6);
     rs = MIN(rs, 3);
     CGFloat w = cs * u + (cs - 1) * gap;
     CGFloat boxH = rs * uh + (rs - 1) * gap;
@@ -477,8 +493,9 @@ static UIImageView *CXGlyph(NSString *name, CGFloat pt, UIColor *tint) {
     c.check.tintColor = planned ? [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0]
                                 : [UIColor colorWithWhite:1.0 alpha:0.7];
     c.box.alpha = (already && !planned) ? 0.45 : 1.0;
-    c.box.layer.borderWidth = planned ? 2.5 : 0;
-    c.box.layer.borderColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0].CGColor;
+    c.box.layer.borderWidth = planned ? 2.0 : 0.5;
+    c.box.layer.borderColor = (planned ? [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0]
+                                       : [UIColor colorWithWhite:1.0 alpha:0.16]).CGColor;
     [c setNeedsLayout];
     return c;
 }
