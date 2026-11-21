@@ -6,4 +6,4 @@ Description: iOS 18-style Control Center editor (plus and minus buttons)
 Maintainer: yourname
 Author: yourname
 Section: Tweaks
-Depends: mobilesubstrate
+Depends: mobilesubstrate, preferenceloader
