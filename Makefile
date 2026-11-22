@@ -13,3 +13,6 @@ CCPlus_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wn
 CCPlus_FRAMEWORKS = UIKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
+
+SUBPROJECTS += ccplusprefs
+include $(THEOS_MAKE_PATH)/aggregate.mk
