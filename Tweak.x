@@ -5,6 +5,37 @@
 #import "CXPickerController.h"
 
 static BOOL gEditing = NO;
+
+// ---------- Настройки (страница CCPlus в приложении «Настройки») ----------
+static BOOL gEnabled = YES;      // твик включён
+static BOOL gHideBlur = YES;     // убирать размытие сверху
+static BOOL gShowDots = YES;     // точки страниц справа
+static BOOL gHaptics = YES;      // тактильный отклик
+static __weak UIViewController *gOverlayVC = nil;
+
+static BOOL CXPrefBool(NSString *key, BOOL def) {
+    NSString *domain = @"com.yourname.ccplus";
+    CFPreferencesAppSynchronize((__bridge CFStringRef)domain);
+    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)domain);
+    if (!v) return def;
+    BOOL r = def;
+    if (CFGetTypeID(v) == CFBooleanGetTypeID()) {
+        r = CFBooleanGetValue((CFBooleanRef)v);
+    } else if (CFGetTypeID(v) == CFNumberGetTypeID()) {
+        int n = 0;
+        CFNumberGetValue((CFNumberRef)v, kCFNumberIntType, &n);
+        r = (n != 0);
+    }
+    CFRelease(v);
+    return r;
+}
+
+static void CXReloadPrefs(void) {
+    gEnabled = CXPrefBool(@"enabled", YES);
+    gHideBlur = CXPrefBool(@"hideBlur", YES);
+    gShowDots = CXPrefBool(@"showDots", YES);
+    gHaptics = CXPrefBool(@"haptics", YES);
+}
 static NSString *const kEditNote = @"com.ccplus.editChanged";
 enum { kTagPlus = 7001, kTagDone = 7002, kTagCancel = 7003, kTagOverlay = 7010, kTagBadge = 7011 };
 
@@ -185,6 +216,7 @@ static UIButton *CXPill(NSString *title, NSString *symbol, NSInteger tag) {
 }
 
 static void CXHaptic(void) {
+    if (!gHaptics) return;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
 }
 
@@ -940,6 +972,7 @@ static void CXHideTopBlurIn(UIView *root, UIWindow *w, int depth) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    gOverlayVC = self;
     [self cx_forceResetEditing];     // каждое открытие Control Center начинается без «залипшего» состояния
     CXSetForcedIDs(CXCurrentEnabledIDs());
 
@@ -1018,17 +1051,18 @@ static void CXHideTopBlurIn(UIView *root, UIWindow *w, int depth) {
 - (void)cx_pagerTick:(CADisplayLink *)link {
     // Страховка: слой редактирования есть, а Control Center уже скрыт: сбрасываем
     if (gEditing && !self.view.window) { [self cx_forceResetEditing]; return; }
+    if (!gEnabled) { CXUpdateDots(0, 0); return; }
     UIScrollView *sv = CXFindScrollView();
     if (!sv) { CXUpdateDots(0, 0); return; }
 
     if (!gEditing) {
         // Обычный режим: родная прокрутка Control Center без нашего вмешательства, только точки справа
-        CXNaturalDots(sv);
+        if (gShowDots) CXNaturalDots(sv); else CXUpdateDots(0, 0);
 
         // Раз в секунду убираем размытую полосу у верхнего края
         static CFTimeInterval lastBlurScan = 0;
         CFTimeInterval nowT = CACurrentMediaTime();
-        if (nowT - lastBlurScan > 1.0) {
+        if (gHideBlur && nowT - lastBlurScan > 1.0) {
             lastBlurScan = nowT;
             UIWindow *w = self.view.window;
             if (w) CXHideTopBlurIn(w, w, 0);
@@ -1058,7 +1092,7 @@ static void CXHideTopBlurIn(UIView *root, UIWindow *w, int depth) {
 
 %new
 - (void)cx_longPressed:(UILongPressGestureRecognizer *)g {
-    if (g.state != UIGestureRecognizerStateBegan || gEditing) return;
+    if (!gEnabled || g.state != UIGestureRecognizerStateBegan || gEditing) return;
 
     // Зажатие НА модуле (яркость, громкость и т.д.) это штатное раскрытие самого Control Center.
     // Если в этот момент включить редактирование, раскрытый модуль остаётся «висеть» поверх сетки.
@@ -1561,6 +1595,7 @@ static NSString *CXMetaID(id meta) {
 }
 
 static id CXRestoreFiltered(id input, id output) {
+    if (!gEnabled) return output;
     BOOL inOK = [input isKindOfClass:NSSet.class] || [input isKindOfClass:NSArray.class];
     BOOL outOK = [output isKindOfClass:NSSet.class] || [output isKindOfClass:NSArray.class];
     if (!inOK || !outOK) return output;
@@ -1611,6 +1646,7 @@ static id CXRestoreFiltered(id input, id output) {
 
 - (void)layoutSubviews {
     %orig;
+    if (!gEnabled || !gHideBlur) return;
     self.backgroundColor = UIColor.clearColor;
     for (UIView *sub in self.subviews) {
         if (CXLooksLikeBlur(sub)) { sub.hidden = YES; sub.alpha = 0; }
@@ -1619,7 +1655,23 @@ static id CXRestoreFiltered(id input, id output) {
 
 %end
 
+// Настройки изменили на странице CCPlus: перечитываем и применяем сразу
+static void CXPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
+                           const void *object, CFDictionaryRef userInfo) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CXReloadPrefs();
+        if (!gEnabled && gEditing && gOverlayVC) {
+            [(CCUIModularControlCenterOverlayViewController *)gOverlayVC cx_forceResetEditing];
+        }
+        if (!gEnabled) CXUpdateDots(0, 0);
+    });
+}
+
 %ctor {
+    CXReloadPrefs();
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, CXPrefsChanged,
+                                    CFSTR("com.yourname.ccplus/prefschanged"), NULL,
+                                    CFNotificationSuspensionBehaviorCoalesce);
     %init;     // основные хуки
 
     Class repo = NSClassFromString(@"CCSModuleRepository");
